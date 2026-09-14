@@ -186,6 +186,15 @@ async def create(body: ProjectCreate):
 
     repo = _get_repo()
 
+    # On the batch transport a Google Flow project UUID is also this app's
+    # local project ID. Never let a duplicate bubble up as an opaque SQLite 500.
+    if await repo.get_project(flow_project_id):
+        raise HTTPException(
+            409,
+            "This Google Flow project is already linked to a local Flow Kit project. "
+            "Open the existing project, or create/select a different project in flow.google.com.",
+        )
+
     # Step 2: Create local project with the Flow-assigned ID and detected tier
     create_data = body.model_dump(exclude_none=True)
     create_data.pop("tool_name", None)

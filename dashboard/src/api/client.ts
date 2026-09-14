@@ -1,8 +1,9 @@
 const BASE = ''  // same origin, proxied by Vite in dev
 
 export async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
+  const isFormData = options?.body instanceof FormData
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: { ...(isFormData ? {} : { 'Content-Type': 'application/json' }), ...options?.headers },
     ...options,
   })
   if (!res.ok) {

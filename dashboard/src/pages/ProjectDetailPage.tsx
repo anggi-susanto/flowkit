@@ -13,6 +13,8 @@ import { Progress } from '../components/ui/progress'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from '../components/ui/table'
 import { Button } from '../components/ui/button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Plus } from 'lucide-react'
 
 type Tab = 'overview' | 'characters' | 'videos' | 'pipeline'
 const STAGE_KEYS: ('refs' | SceneStage)[] = ['refs', 'image', 'video', 'upscale']
@@ -45,6 +47,10 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
   const [requests, setRequests] = useState<Request[]>([])
   const [loading, setLoading] = useState(true)
   const [pipelineVideoId, setPipelineVideoId] = useState<string>('')
+  const [videoDialogOpen, setVideoDialogOpen] = useState(false)
+  const [creatingVideo, setCreatingVideo] = useState(false)
+  const [videoError, setVideoError] = useState<string | null>(null)
+  const [videoDraft, setVideoDraft] = useState({ title: '', orientation: 'HORIZONTAL' })
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
@@ -75,6 +81,28 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
       next.set('tab', t)
       return next
     })
+  }
+
+  async function createVideo(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!videoDraft.title.trim()) return
+    setCreatingVideo(true)
+    setVideoError(null)
+    try {
+      const video = await fetchAPI<Video>('/api/videos', {
+        method: 'POST',
+        body: JSON.stringify({ project_id: projectId, title: videoDraft.title.trim(), orientation: videoDraft.orientation, display_order: videos.length }),
+      })
+      setVideoDialogOpen(false)
+      setVideoDraft({ title: '', orientation: 'HORIZONTAL' })
+      await fetchAll()
+      setPipelineVideoId(video.id)
+      setTab('pipeline')
+    } catch (error) {
+      setVideoError(error instanceof Error ? error.message : 'Could not create video.')
+    } finally {
+      setCreatingVideo(false)
+    }
   }
 
   async function patchProject(field: string, value: string) {
@@ -220,6 +248,9 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
         </TabsContent>
 
         <TabsContent value="videos" className="pt-4">
+          <div className="mb-3 flex justify-end">
+            <Button size="sm" onClick={() => setVideoDialogOpen(true)}><Plus />Add video</Button>
+          </div>
           {videos.length === 0 ? (
             <div className="text-xs" style={{ color: 'var(--muted)' }}>{t('projectDetail.noVideos')}</div>
           ) : (
@@ -296,6 +327,36 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
           )}
         </TabsContent>
       </Tabs>
+
+      <Dialog open={videoDialogOpen} onOpenChange={open => {
+        setVideoDialogOpen(open)
+        if (!open) setVideoError(null)
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Add video</DialogTitle>
+            <DialogDescription>Create a video container, then add scenes and generate their images.</DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-3" onSubmit={createVideo}>
+            <label className="grid gap-1.5 text-xs font-medium">
+              Video title
+              <input autoFocus required value={videoDraft.title} onChange={event => setVideoDraft(current => ({ ...current, title: event.target.value }))} className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="First image test" />
+            </label>
+            <label className="grid gap-1.5 text-xs font-medium">
+              Orientation
+              <select value={videoDraft.orientation} onChange={event => setVideoDraft(current => ({ ...current, orientation: event.target.value }))} className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <option value="HORIZONTAL">Horizontal (16:9)</option>
+                <option value="VERTICAL">Vertical (9:16)</option>
+              </select>
+            </label>
+            {videoError && <p className="text-xs text-destructive">{videoError}</p>}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setVideoDialogOpen(false)}>Cancel</Button>
+              <Button type="submit" disabled={creatingVideo || !videoDraft.title.trim()}>{creatingVideo ? 'Creating…' : 'Create video'}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
