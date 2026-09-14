@@ -26,3 +26,6 @@ ds-bundle/
 graphify-out/
 
 .venv/
+
+.DS_Store
+extension/_metadata/
