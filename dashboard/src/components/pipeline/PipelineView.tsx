@@ -16,8 +16,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Plus } from 'lucide-react'
 
 type StageKey = 'refs' | 'image' | 'video' | 'upscale'
-interface SceneDraft { display_order: number; narrator_text: string; prompt: string; duration: number }
-interface TranscriptSegment { start: number; end: number; text: string }
 
 interface PipelineViewProps {
   projectId: string
@@ -57,11 +55,6 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
   const [creatingScene, setCreatingScene] = useState(false)
   const [sceneError, setSceneError] = useState<string | null>(null)
   const [scenePrompt, setScenePrompt] = useState('')
-  const [audioFile, setAudioFile] = useState<File | null>(null)
-  const [transcript, setTranscript] = useState('')
-  const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([])
-  const [sceneDrafts, setSceneDrafts] = useState<SceneDraft[]>([])
-  const [audioBusy, setAudioBusy] = useState(false)
 
   const { lastEvent } = useWebSocketContext()
 
@@ -91,36 +84,6 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
     }
   }, [lastEvent, load])
 
-  async function transcribeAudio() {
-    if (!audioFile) return
-    setAudioBusy(true); setSceneError(null)
-    try {
-      const form = new FormData(); form.append('file', audioFile)
-      const result = await fetchAPI<{ transcript: string; segments: TranscriptSegment[] }>('/api/audio/transcribe', { method: 'POST', body: form })
-      setTranscript(result.transcript); setTranscriptSegments(result.segments); setSceneDrafts([])
-    } catch (error) { setSceneError(error instanceof Error ? error.message : 'Could not transcribe audio.') }
-    finally { setAudioBusy(false) }
-  }
-
-  async function proposeScenes() {
-    if (!transcript.trim()) return
-    setAudioBusy(true); setSceneError(null)
-    try {
-      const result = await fetchAPI<{ scenes: SceneDraft[] }>('/api/audio/propose-scenes', { method: 'POST', body: JSON.stringify({ transcript, segments: transcriptSegments, target_seconds: 6 }) })
-      setSceneDrafts(result.scenes)
-    } catch (error) { setSceneError(error instanceof Error ? error.message : 'Could not plan scenes.') }
-    finally { setAudioBusy(false) }
-  }
-
-  async function createPlannedScenes() {
-    if (!sceneDrafts.length) return
-    setAudioBusy(true); setSceneError(null)
-    try {
-      await Promise.all(sceneDrafts.map((draft, index) => fetchAPI<Scene>('/api/scenes', { method: 'POST', body: JSON.stringify({ video_id: videoId, prompt: draft.prompt, narrator_text: draft.narrator_text, duration: draft.duration, display_order: scenes.length + index, chain_type: 'ROOT', source: 'user' }) })))
-      setSceneDialogOpen(false); setAudioFile(null); setTranscript(''); setTranscriptSegments([]); setSceneDrafts([]); await load()
-    } catch (error) { setSceneError(error instanceof Error ? error.message : 'Could not create scenes.') }
-    finally { setAudioBusy(false) }
-  }
   async function createScene(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!scenePrompt.trim() || !video) return
@@ -366,14 +329,6 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
             <DialogDescription>The prompt is sent to Google Flow immediately after the scene is created.</DialogDescription>
           </DialogHeader>
           <form className="grid gap-3" onSubmit={createScene}>
-            <div className="grid gap-1.5 rounded-md border border-border p-3">
-              <span className="text-xs font-medium">Turn narration audio into scenes</span>
-              <input type="file" accept="audio/*,video/mp4,video/webm" onChange={event => setAudioFile(event.target.files?.[0] ?? null)} className="text-xs" />
-              <div className="flex gap-2"><Button type="button" size="sm" variant="outline" disabled={!audioFile || audioBusy} onClick={transcribeAudio}>{audioBusy ? 'Working…' : 'Transcribe audio'}</Button>{transcript && <Button type="button" size="sm" variant="outline" disabled={audioBusy} onClick={proposeScenes}>Propose scenes</Button>}</div>
-              {transcript && <textarea value={transcript} onChange={event => setTranscript(event.target.value)} className="min-h-24 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none" />}
-              {sceneDrafts.length > 0 && <div className="grid gap-2"><p className="text-[11px]" style={{ color: 'var(--muted)' }}>{sceneDrafts.length} scenes proposed. Review the narration below, then create them.</p>{sceneDrafts.map((draft, index) => <div key={index} className="rounded border border-border p-2 text-xs"><strong>Scene {index + 1} · {draft.duration}s</strong><p className="mt-1" style={{ color: 'var(--muted)' }}>{draft.narrator_text}</p></div>)}<Button type="button" disabled={audioBusy} onClick={createPlannedScenes}>{audioBusy ? 'Creating…' : 'Create planned scenes'}</Button></div>}
-            </div>
-            <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--muted)' }}><span className="h-px flex-1 bg-border" />or write one scene<span className="h-px flex-1 bg-border" /></div>
             <label className="grid gap-1.5 text-xs font-medium">
               Scene prompt
               <textarea autoFocus required value={scenePrompt} onChange={event => setScenePrompt(event.target.value)} className="min-h-32 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="A small orange cat walks through a rain-soaked Tokyo alley at night, neon reflections ripple in puddles." />

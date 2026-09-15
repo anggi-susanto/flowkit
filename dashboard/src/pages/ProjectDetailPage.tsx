@@ -4,6 +4,7 @@ import { fetchAPI, patchAPI } from '../api/client'
 import type { Project, Character, Video, Scene, Request } from '../types'
 import EditableText from '../components/projects/EditableText'
 import PipelineView from '../components/pipeline/PipelineView'
+import AudioScenePlanner from '../components/pipeline/AudioScenePlanner'
 import { count, charStatus, videoStageBreakdown, type SceneStage } from '../lib/stageStats'
 import { useTranslation } from '../i18n/useTranslation'
 import { statusLabel, stateLabel, projectStatusLabel, stageLowerLabel } from '../i18n/labels'
@@ -16,7 +17,7 @@ import { Button } from '../components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Plus } from 'lucide-react'
 
-type Tab = 'overview' | 'characters' | 'videos' | 'pipeline'
+type Tab = 'overview' | 'characters' | 'videos' | 'audio' | 'pipeline'
 const STAGE_KEYS: ('refs' | SceneStage)[] = ['refs', 'image', 'video', 'upscale']
 
 interface Props {
@@ -146,6 +147,7 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
           <TabsTrigger value="overview">{t('projectDetail.tab.overview')}</TabsTrigger>
           <TabsTrigger value="characters">{t('projectDetail.tab.characters', { n: characters.length })}</TabsTrigger>
           <TabsTrigger value="videos">{t('projectDetail.tab.videos', { n: videos.length })}</TabsTrigger>
+          <TabsTrigger value="audio">Audio → Scenes</TabsTrigger>
           <TabsTrigger value="pipeline">{t('projectDetail.tab.pipeline')}</TabsTrigger>
         </TabsList>
 
@@ -209,6 +211,20 @@ export default function ProjectDetailPage({ projectId, onBack }: Props) {
               </Card>
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="audio" className="pt-4">
+          {videos.length === 0 ? (
+            <div className="text-xs" style={{ color: 'var(--muted)' }}>Create a video before turning audio into scenes.</div>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[9px] tracking-widest" style={{ color: 'var(--muted)' }}>VIDEO</span>
+                {videos.map(v => <Button key={v.id} variant={v.id === pipelineVideoId ? 'default' : 'outline'} size="sm" onClick={() => setPipelineVideoId(v.id)}>{v.title}</Button>)}
+              </div>
+              {pipelineVideoId && <AudioScenePlanner videoId={pipelineVideoId} existingSceneCount={(scenesByVideo[pipelineVideoId] ?? []).length} onCreated={fetchAll} />}
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="characters" className="pt-4">

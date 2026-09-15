@@ -2,10 +2,12 @@ from fastapi import APIRouter, HTTPException
 from agent.models.scene import Scene, SceneCreate, SceneUpdate
 from agent.sdk.persistence.sqlite_repository import SQLiteRepository
 import json
+import logging
 
 router = APIRouter(prefix="/scenes", tags=["scenes"])
 
 _repo = SQLiteRepository()
+logger = logging.getLogger(__name__)
 
 
 def _scene_to_flat(sdk_scene) -> dict:
@@ -57,6 +59,11 @@ async def create(body: SceneCreate):
             await _repo.update("scene", s.id, display_order=s.display_order + 1)
 
     sdk_scene = await _repo.create_scene(**data)
+    logger.info(
+        "Scene created: id=%s video=%s order=%d source=%s chain=%s narrator_words=%d prompt_chars=%d",
+        sdk_scene.id[:8], sdk_scene.video_id[:8], sdk_scene.display_order, sdk_scene.source, sdk_scene.chain_type,
+        len((sdk_scene.narrator_text or "").split()), len(sdk_scene.prompt or ""),
+    )
     return _scene_to_flat(sdk_scene)
 
 
