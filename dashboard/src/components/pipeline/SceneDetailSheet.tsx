@@ -70,12 +70,14 @@ interface SceneDetailSheetProps {
   reviewError?: string | null
   onRunReview: (mode: 'light' | 'deep') => void
   onRetry: () => void
+  onGenerateImage: () => void
   retrying: boolean
+  generatingImage: boolean
 }
 
 export default function SceneDetailSheet({
   open, onOpenChange, scene, stage, stageName, characters, requests, review,
-  reviewRunning, runningMode, reviewError, onRunReview, onRetry, retrying,
+  reviewRunning, runningMode, reviewError, onRunReview, onRetry, onGenerateImage, retrying, generatingImage,
 }: SceneDetailSheetProps) {
   const { t } = useTranslation()
   const [tab, setTab] = useState('output')
@@ -105,6 +107,9 @@ export default function SceneDetailSheet({
               <span className="w-1.5 h-1.5 rounded-full" style={{ background: STATUS_COLORS[status] }} />
               {statusLabel(t, status)}
             </span>
+            {stage === 'image' && status === 'PENDING' && (
+              <Button size="sm" disabled={generatingImage} onClick={onGenerateImage}>{generatingImage ? 'Queuing…' : 'Generate image'}</Button>
+            )}
             <span className="text-[10px] tracking-wide" style={{ color: 'var(--muted)' }}>
               {t('sceneSheet.retryOf3', { n: currentRequest?.retry_count ?? 0 })}
             </span>

@@ -77,7 +77,7 @@ export default function SceneCard({ scene, stage, retries, verdict, onClick }: S
             style={{ aspectRatio: '16/9', background: 'var(--surface)', border: '1px solid var(--border)' }}
           >
             {thumbUrl ? (
-              <img src={thumbUrl} alt={t('sceneCard.scene', { n: scene.display_order + 1 })} className="w-full h-full object-cover" />
+              <img src={thumbUrl} alt={t('sceneCard.scene', { n: scene.display_order + 1 })} className="w-full h-full object-cover" onError={event => { event.currentTarget.style.display = 'none' }} />
             ) : (
               <>
                 <div className="absolute inset-0" style={{ background: STATUS_TINT[status] }} />

@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from typing import Literal, cast
 
@@ -24,17 +23,24 @@ _model_cache: dict[str, object] = {}
 _ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
+class RemoteAudioTooLargeError(RuntimeError):
+    """The configured remote provider rejected media over its contract limit."""
+
+
 class TranscriptSegment(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     text: str
 
 
-class TranscriptResponse(BaseModel):
-    transcript: str
+class TranscriptionJobResponse(BaseModel):
+    status: str
+    job_id: str | None = None
+    transcript: str | None = None
     language: str | None = None
     duration_seconds: float | None = None
-    segments: list[TranscriptSegment]
+    segments: list[TranscriptSegment] = Field(default_factory=list)
+    error: str | None = None
 
 
 class SceneDraft(BaseModel):
@@ -113,6 +119,14 @@ def _remote_config() -> tuple[str, tuple[str, str]] | None:
     return (base_url.rstrip("/"), (username, password)) if base_url and username and password else None
 
 
+def _llm_config() -> tuple[str, str, str] | None:
+    """Read the OpenAI-compatible provider used to write Google Flow visual prompts."""
+    base_url = _env_value("LLM_PROVIDER_BASE_URL")
+    token = _env_value("LLM_PROVIDER_TOKEN")
+    model = _env_value("LLM_PROVIDER_MODEL")
+    return (base_url.rstrip("/"), token, model) if base_url and token and model else None
+
+
 def _remote_mode() -> Literal["transcribe", "lyrics"]:
     """Return the Gunamaya decoding mode selected for this local deployment."""
     mode = (_env_value("TRANSCRIBE_MODE") or "transcribe").lower()
@@ -143,16 +157,13 @@ def _remote_segments(payload: dict) -> list[TranscriptSegment]:
     return sorted(segments, key=lambda segment: (segment.start, segment.end))
 
 
-async def _remote_transcribe(path: Path, filename: str, media_type: str | None) -> tuple[str, str | None, list[TranscriptSegment], str]:
+async def _remote_submit(path: Path, filename: str, media_type: str | None) -> tuple[dict, str]:
     config = _remote_config()
     if not config:
         raise RuntimeError("Remote transcription is not configured.")
     base_url, auth = config
-    timeout_seconds = int(_env_value("TRANSCRIBE_TIMEOUT_SECONDS") or "900")
-    poll_seconds = float(_env_value("TRANSCRIBE_POLL_SECONDS") or "3")
     mode = _remote_mode()
     timestamps = _remote_timestamps(mode)
-    started = time.monotonic()
 
     async with httpx.AsyncClient(auth=auth, timeout=60.0) as client:
         with path.open("rb") as audio:
@@ -162,6 +173,8 @@ async def _remote_transcribe(path: Path, filename: str, media_type: str | None) 
                 data={"language": "id", "mode": mode, "timestamps": timestamps},
                 files={"file": (filename, audio, media_type or "application/octet-stream")},
             )
+        if response.status_code == 413:
+            raise RemoteAudioTooLargeError("Audio file exceeds Gunamaya's 100 MiB upload limit. Compress, trim, or split the audio before transcribing.")
         response.raise_for_status()
         job = response.json()
         job_id = job.get("id") or job.get("process_id")
@@ -172,31 +185,26 @@ async def _remote_transcribe(path: Path, filename: str, media_type: str | None) 
             "Remote transcription submitted: job=%s mode=%s timestamps=%s cached=%s state=%s",
             str(job_id)[:8], mode, timestamps, bool(job.get("cached")), initial_state or "unknown",
         )
-
-        while time.monotonic() - started < timeout_seconds:
-            # A lyrics duplicate can be returned already completed as HTTP 200/cache hit.
-            # Its result is immediately available; no unnecessary status poll is needed.
-            status = job if initial_state == "completed" else None
-            if status is None:
-                status_response = await client.get(f"{base_url}/v1/transcriptions/{job_id}")
-                status_response.raise_for_status()
-                status = status_response.json()
-            state = str(status.get("status", "")).lower()
-            if state == "completed":
-                result_response = await client.get(f"{base_url}/v1/transcriptions/{job_id}/result")
-                result_response.raise_for_status()
-                result = result_response.json()
-                transcript = str(result.get("text") or result.get("transcript") or result.get("data", {}).get("text") or "").strip()
-                if not transcript:
-                    raise RuntimeError("Remote transcription completed without transcript text.")
-                return transcript, result.get("language") or status.get("language"), _remote_segments(result), str(job_id)
-            if state in {"failed", "error", "cancelled", "canceled"}:
-                raise RuntimeError(f"Remote transcription failed: {status.get('error') or status.get('message') or state}")
-            await asyncio.sleep(poll_seconds)
-    raise RuntimeError(f"Remote transcription timed out after {timeout_seconds}s.")
+        return job, str(job_id)
 
 
-@router.post("/transcribe", response_model=TranscriptResponse)
+async def _remote_job_status(job_id: str) -> tuple[dict, dict | None]:
+    config = _remote_config()
+    if not config:
+        raise RuntimeError("Remote transcription is not configured.")
+    base_url, auth = config
+    async with httpx.AsyncClient(auth=auth, timeout=60.0) as client:
+        status_response = await client.get(f"{base_url}/v1/transcriptions/{job_id}")
+        status_response.raise_for_status()
+        status = status_response.json()
+        if str(status.get("status", "")).lower() != "completed":
+            return status, None
+        result_response = await client.get(f"{base_url}/v1/transcriptions/{job_id}/result")
+        result_response.raise_for_status()
+        return status, result_response.json()
+
+
+@router.post("/transcribe", response_model=TranscriptionJobResponse)
 async def transcribe_audio(file: UploadFile = File(...)):
     suffix = Path(file.filename or "audio").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -204,7 +212,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
 
     data = await file.read(MAX_AUDIO_BYTES + 1)
     if len(data) > MAX_AUDIO_BYTES:
-        raise HTTPException(413, "Audio file is larger than 100 MB.")
+        raise HTTPException(413, "Audio file is larger than 100 MiB.")
     if not data:
         raise HTTPException(400, "Audio file is empty.")
 
@@ -217,12 +225,14 @@ async def transcribe_audio(file: UploadFile = File(...)):
         tmp.close()
         media_duration = await asyncio.to_thread(_media_duration, path)
         if _remote_config():
-            transcript, language, segments, job_id = await _remote_transcribe(path, file.filename or "audio", file.content_type)
-            speech_duration = max((segment.end for segment in segments), default=None)
-            model_name, cache_hit = "gunamaya-remote", False
-            logger.info("Remote transcription completed: job=%s segments=%d words=%d", job_id[:8], len(segments), len(transcript.split()))
+            job, job_id = await _remote_submit(path, file.filename or "audio", file.content_type)
+            state = str(job.get("status", "queued")).lower()
+            # Cache hits are already complete, but fetch their result through the same status endpoint.
+            return TranscriptionJobResponse(status=state, job_id=job_id, duration_seconds=media_duration)
         else:
             transcript, language, speech_duration, segments, model_name, cache_hit = await asyncio.to_thread(_transcribe, path)
+    except RemoteAudioTooLargeError as exc:
+        raise HTTPException(413, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
     except Exception as exc:
@@ -236,7 +246,34 @@ async def transcribe_audio(file: UploadFile = File(...)):
         "Audio transcribe completed: model=%s cache_hit=%s language=%s media_duration_s=%.1f speech_timeline_s=%.1f segments=%d words=%d",
         model_name, cache_hit, language or "unknown", media_duration or speech_duration or 0, speech_duration or 0, len(segments), len(transcript.split()),
     )
-    return TranscriptResponse(transcript=transcript, language=language, duration_seconds=media_duration or speech_duration, segments=segments)
+    return TranscriptionJobResponse(status="completed", transcript=transcript, language=language, duration_seconds=media_duration or speech_duration, segments=segments)
+
+
+@router.get("/transcribe/{job_id}", response_model=TranscriptionJobResponse)
+async def transcription_status(job_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", job_id):
+        raise HTTPException(400, "Invalid transcription job ID.")
+    try:
+        status, result = await _remote_job_status(job_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(404, "Transcription job was not found.") from exc
+        raise HTTPException(502, "Could not retrieve transcription status from Gunamaya.") from exc
+    except Exception as exc:
+        raise HTTPException(502, f"Could not retrieve transcription status: {exc}") from exc
+
+    state = str(status.get("status", "unknown")).lower()
+    if state in {"failed", "error", "cancelled", "canceled"}:
+        return TranscriptionJobResponse(status=state, job_id=job_id, error=str(status.get("error") or status.get("message") or state))
+    if result is None:
+        return TranscriptionJobResponse(status=state, job_id=job_id)
+    transcript = str(result.get("text") or result.get("transcript") or result.get("data", {}).get("text") or "").strip()
+    if not transcript:
+        return TranscriptionJobResponse(status="failed", job_id=job_id, error="Remote transcription completed without transcript text.")
+    return TranscriptionJobResponse(
+        status="completed", job_id=job_id, transcript=transcript,
+        language=result.get("language") or status.get("language"), segments=_remote_segments(result),
+    )
 
 
 def _sentences(transcript: str) -> list[str]:
@@ -298,6 +335,58 @@ def _duration_chunks(transcript: str, target_seconds: int, audio_duration: float
     return [(text_chunks[index] if index < len(text_chunks) else "Instrumental or ambient moment; continue the visual story without dialogue.", duration) for index, duration in enumerate(windows)]
 
 
+def _llm_chat_url(base_url: str) -> str:
+    return base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+
+
+async def _flow_prompt(client: httpx.AsyncClient, chat_url: str, model: str, lyric: str, index: int, scene_count: int) -> str:
+    response = await client.post(
+        chat_url,
+        json={
+            "model": model,
+            "temperature": 0.8,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You write concise, production-ready visual prompts for Google Flow image-to-video scenes. "
+                        "Return only one English visual prompt, no title, quotation marks, narration, or markdown. "
+                        "Make it cinematic and specific: subject, action, setting, lighting, camera composition/movement, mood, "
+                        "and visual style. Preserve emotional continuity across a music video. Do not include text, subtitles, logos, "
+                        "or copyrighted characters."
+                    ),
+                },
+                {"role": "user", "content": f"Music-video scene {index + 1} of {scene_count}. Indonesian lyric/timeline beat:\n{lyric}"},
+            ],
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    choices = payload.get("choices") or []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+    prompt = str((message or {}).get("content") or "").strip()
+    if not prompt:
+        raise RuntimeError("LLM returned no visual prompt.")
+    return prompt.strip('"')
+
+
+async def _generate_flow_prompts(chunks: list[tuple[str, float]]) -> list[str]:
+    config = _llm_config()
+    if not config:
+        raise RuntimeError("LLM prompt generation is not configured. Set LLM_PROVIDER_BASE_URL, LLM_PROVIDER_TOKEN, and LLM_PROVIDER_MODEL.")
+    base_url, token, model = config
+    chat_url = _llm_chat_url(base_url)
+    # Keep a bounded number of parallel calls so long songs do not overwhelm the provider.
+    semaphore = asyncio.Semaphore(5)
+
+    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=90.0) as client:
+        async def generate(index: int, chunk: tuple[str, float]) -> str:
+            async with semaphore:
+                return await _flow_prompt(client, chat_url, model, chunk[0], index, len(chunks))
+
+        return await asyncio.gather(*(generate(index, chunk) for index, chunk in enumerate(chunks)))
+
+
 @router.post("/propose-scenes", response_model=ScenePlanResponse)
 async def propose_scenes(body: ScenePlanRequest):
     if not body.transcript.strip():
@@ -318,15 +407,18 @@ async def propose_scenes(body: ScenePlanRequest):
         len(body.transcript.split()), len(chunks), [round(duration, 1) for _, duration in chunks],
     )
 
+    try:
+        prompts = await _generate_flow_prompts(chunks)
+    except httpx.HTTPStatusError as exc:
+        logger.warning("LLM scene prompt request failed: status=%s", exc.response.status_code)
+        raise HTTPException(502, "The LLM provider could not generate visual prompts.") from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("LLM scene prompt generation failed")
+        raise HTTPException(502, "The LLM provider could not generate visual prompts.") from exc
+
     return ScenePlanResponse(scenes=[
-        SceneDraft(
-            display_order=index,
-            narrator_text=chunk,
-            prompt=(
-                "Create a cinematic visual that directly supports this narration: "
-                f"{chunk}"
-            ),
-            duration=round(max(2, min(12, duration)), 1),
-        )
+        SceneDraft(display_order=index, narrator_text=chunk, prompt=prompts[index], duration=round(max(2, min(12, duration)), 1))
         for index, (chunk, duration) in enumerate(chunks)
     ])

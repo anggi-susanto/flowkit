@@ -6,6 +6,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui
 
 type TranscriptSegment = { start: number; end: number; text: string }
 type SceneDraft = { display_order: number; narrator_text: string; prompt: string; duration: number }
+type TranscriptionJob = { status: string; job_id?: string; transcript?: string; language?: string | null; duration_seconds?: number | null; segments?: TranscriptSegment[]; error?: string | null }
+const MAX_AUDIO_BYTES = 100 * 1024 * 1024
 
 interface Props {
   videoId: string
@@ -21,33 +23,59 @@ export default function AudioScenePlanner({ videoId, existingSceneCount, onCreat
   const [drafts, setDrafts] = useState<SceneDraft[]>([])
   const [targetSeconds, setTargetSeconds] = useState<4 | 6 | 8>(6)
   const [busy, setBusy] = useState<'transcribe' | 'plan' | 'create' | null>(null)
+  const [transcriptionStatus, setTranscriptionStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   async function transcribe() {
     if (!audioFile) return
+    if (audioFile.size > MAX_AUDIO_BYTES) {
+      setError('Audio files must be 100 MiB or smaller. Compress, trim, or split the file before uploading.')
+      return
+    }
     setBusy('transcribe'); setError(null)
     try {
       const form = new FormData()
       form.append('file', audioFile)
-      const result = await fetchAPI<{ transcript: string; segments: TranscriptSegment[]; duration_seconds: number | null }>('/api/audio/transcribe', { method: 'POST', body: form })
-      setTranscript(result.transcript)
-      setSegments(result.segments)
-      setAudioDuration(result.duration_seconds)
-      setDrafts([])
+      const submitted = await fetchAPI<TranscriptionJob>('/api/audio/transcribe', { method: 'POST', body: form })
+      setAudioDuration(submitted.duration_seconds ?? null)
+      if (submitted.status === 'completed' && submitted.transcript) {
+        setTranscript(submitted.transcript)
+        setSegments(submitted.segments ?? [])
+        setTranscriptionStatus(null)
+        await planScenes(submitted.transcript, submitted.segments ?? [], submitted.duration_seconds ?? null)
+      } else {
+        if (!submitted.job_id) throw new Error('The transcription provider did not return a job ID.')
+        setTranscriptionStatus(submitted.status === 'processing' ? 'Transcribing audio…' : 'Queued by transcription provider…')
+        while (true) {
+          await new Promise(resolve => window.setTimeout(resolve, 3000))
+          const result = await fetchAPI<TranscriptionJob>(`/api/audio/transcribe/${submitted.job_id}`)
+          if (result.status === 'completed') {
+            if (!result.transcript) throw new Error('The transcription job completed without text.')
+            setTranscript(result.transcript)
+            setSegments(result.segments ?? [])
+            setTranscriptionStatus(null)
+            await planScenes(result.transcript, result.segments ?? [], submitted.duration_seconds ?? null)
+            break
+          }
+          if (['failed', 'error', 'cancelled', 'canceled'].includes(result.status)) throw new Error(result.error || 'Transcription failed.')
+          setTranscriptionStatus(result.status === 'processing' ? 'Transcribing audio…' : 'Queued by transcription provider…')
+        }
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not transcribe audio.')
     } finally {
       setBusy(null)
+      setTranscriptionStatus(null)
     }
   }
 
-  async function planScenes() {
-    if (!transcript.trim()) return
+  async function planScenes(sourceTranscript = transcript, sourceSegments = segments, sourceDuration = audioDuration) {
+    if (!sourceTranscript.trim()) return
     setBusy('plan'); setError(null)
     try {
       const result = await fetchAPI<{ scenes: SceneDraft[] }>('/api/audio/propose-scenes', {
         method: 'POST',
-        body: JSON.stringify({ transcript, segments, audio_duration_seconds: audioDuration, target_seconds: targetSeconds }),
+        body: JSON.stringify({ transcript: sourceTranscript, segments: sourceSegments, audio_duration_seconds: sourceDuration, target_seconds: targetSeconds }),
       })
       setDrafts(result.scenes)
     } catch (cause) {
@@ -92,27 +120,27 @@ export default function AudioScenePlanner({ videoId, existingSceneCount, onCreat
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-5">
       <div className="flex flex-col gap-1">
         <h2 className="m-0 text-xl font-semibold tracking-tight">Audio to scenes</h2>
-        <p className="m-0 text-sm" style={{ color: 'var(--muted)' }}>Transcribe narration, inspect the text, then turn it into editable timed scene drafts.</p>
+        <p className="m-0 text-sm" style={{ color: 'var(--muted)' }}>Upload a song to transcribe lyric timing and automatically draft editable Google Flow visual prompts.</p>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)]">
         <Card className="py-4">
           <CardHeader>
             <CardTitle className="text-xs tracking-widest uppercase">1 · Source audio</CardTitle>
-            <CardDescription>MP3, WAV, M4A, AAC, OGG, FLAC, MP4, or WebM · maximum 100 MB.</CardDescription>
+            <CardDescription>MP3, WAV, M4A, AAC, OGG, FLAC, MP4, or WebM · maximum 100 MiB.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            <input type="file" accept="audio/*,video/mp4,video/webm" onChange={event => setAudioFile(event.target.files?.[0] ?? null)} className="text-xs" />
-            {audioFile && <span className="text-xs" style={{ color: 'var(--muted)' }}>{audioFile.name}</span>}
-            <Button disabled={!audioFile || busy !== null} onClick={transcribe}>{busy === 'transcribe' ? 'Transcribing…' : 'Transcribe audio'}</Button>
-            <p className="m-0 text-[11px] leading-relaxed" style={{ color: 'var(--muted)' }}>Uses the configured transcription provider (or local Whisper fallback). Review song lyrics before planning scenes.</p>
+            <input type="file" accept="audio/*,video/mp4,video/webm" onChange={event => { setAudioFile(event.target.files?.[0] ?? null); setError(null) }} className="text-xs" />
+            {audioFile && <span className="text-xs" style={{ color: 'var(--muted)' }}>{audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MiB</span>}
+            <Button disabled={!audioFile || busy !== null} onClick={transcribe}>{busy === 'transcribe' ? (transcriptionStatus || 'Submitting audio…') : busy === 'plan' ? 'Generating Flow prompts…' : 'Transcribe & generate scenes'}</Button>
+            <p className="m-0 text-[11px] leading-relaxed" style={{ color: 'var(--muted)' }}>Uses lyric timing, then the configured LLM creates one Google Flow-ready visual prompt per timed scene.</p>
           </CardContent>
         </Card>
 
         <Card className="py-4">
           <CardHeader>
             <CardTitle className="text-xs tracking-widest uppercase">2 · Transcript</CardTitle>
-            <CardDescription>Correct words before generating the scene plan. Editing text disables its original timing map.</CardDescription>
+            <CardDescription>Lyrics and timeline segments appear here automatically. Editing text disables its original timing map; use Generate prompts again after edits.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <textarea value={transcript} onChange={event => { setTranscript(event.target.value); setSegments([]); setDrafts([]) }} className="min-h-56 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-ring" placeholder="Upload and transcribe an audio file, or paste your narration here." />
@@ -122,7 +150,7 @@ export default function AudioScenePlanner({ videoId, existingSceneCount, onCreat
                   <option value={4}>4 seconds</option><option value={6}>6 seconds</option><option value={8}>8 seconds</option>
                 </select>
               </label>
-              <Button disabled={!transcript.trim() || busy !== null} onClick={planScenes}>{busy === 'plan' ? 'Planning…' : 'Propose scenes'}</Button>
+              <Button disabled={!transcript.trim() || busy !== null} onClick={() => planScenes()}>{busy === 'plan' ? 'Generating prompts…' : 'Generate prompts again'}</Button>
             </div>
           </CardContent>
         </Card>

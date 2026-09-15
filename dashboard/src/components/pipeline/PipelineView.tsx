@@ -13,7 +13,7 @@ import StageNode from './StageNode'
 import SceneCard from './SceneCard'
 import SceneDetailSheet from './SceneDetailSheet'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog'
-import { Plus } from 'lucide-react'
+import { ImagePlus, Plus, RefreshCw } from 'lucide-react'
 
 type StageKey = 'refs' | 'image' | 'video' | 'upscale'
 
@@ -55,6 +55,8 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
   const [creatingScene, setCreatingScene] = useState(false)
   const [sceneError, setSceneError] = useState<string | null>(null)
   const [scenePrompt, setScenePrompt] = useState('')
+  const [queuingImages, setQueuingImages] = useState(false)
+  const [refreshingUrls, setRefreshingUrls] = useState(false)
 
   const { lastEvent } = useWebSocketContext()
 
@@ -84,6 +86,39 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
     }
   }, [lastEvent, load])
 
+  async function queueImages(sceneIds: string[]) {
+    if (!sceneIds.length) return
+    setQueuingImages(true)
+    try {
+      await fetchAPI('/api/requests/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          requests: sceneIds.map(scene_id => ({
+            type: 'GENERATE_IMAGE', scene_id, project_id: projectId, video_id: videoId,
+            orientation: video?.orientation ?? 'HORIZONTAL',
+          })),
+        }),
+      })
+      await load()
+    } catch (error) {
+      setSceneError(error instanceof Error ? error.message : 'Could not queue image generation.')
+    } finally {
+      setQueuingImages(false)
+    }
+  }
+
+  async function refreshUrls() {
+    setRefreshingUrls(true)
+    try {
+      await fetchAPI(`/api/flow/refresh-urls/${projectId}`, { method: 'POST' })
+      await load()
+    } catch (error) {
+      setSceneError(error instanceof Error ? error.message : 'Could not refresh Google Flow media URLs. Ensure the extension is connected.')
+    } finally {
+      setRefreshingUrls(false)
+    }
+  }
+
   async function createScene(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!scenePrompt.trim() || !video) return
@@ -111,6 +146,7 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
   const videoRequests = requests.filter(r => r.video_id === videoId)
   const anyProcessing = videoRequests.some(r => r.status === 'PROCESSING')
   const pendingCount = videoRequests.filter(r => r.status === 'PENDING').length
+  const scenesWithoutImages = scenes.filter(scene => sceneStageStatus(scene, 'image') === 'PENDING')
 
   const stageBreakdown: Record<StageKey, ReturnType<typeof count>> = {
     refs: count(characters.map(c => charStatus(c, requests))),
@@ -220,6 +256,8 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
             </span>
             <span className="text-[11px]" style={{ color: 'var(--muted)' }}>· {t('pipeline.queue', { n: pendingCount })}</span>
           </div>
+          <Button size="sm" variant="outline" disabled={refreshingUrls} onClick={refreshUrls}><RefreshCw className={refreshingUrls ? 'animate-spin' : ''} />Refresh media</Button>
+          <Button size="sm" variant="outline" disabled={!scenesWithoutImages.length || queuingImages} onClick={() => queueImages(scenesWithoutImages.map(scene => scene.id))}><ImagePlus />{queuingImages ? 'Queuing…' : `Generate all (${scenesWithoutImages.length})`}</Button>
           <Button size="sm" onClick={() => setSceneDialogOpen(true)}><Plus />Add scene &amp; generate image</Button>
         </div>
       </div>
@@ -316,7 +354,9 @@ export default function PipelineView({ projectId, videoId }: PipelineViewProps) 
         reviewError={reviewError}
         onRunReview={runReview}
         onRetry={retryStage}
+        onGenerateImage={() => selectedScene && queueImages([selectedScene.id])}
         retrying={!!selectedScene && retryingSceneId === selectedScene.id}
+        generatingImage={queuingImages}
       />
 
       <Dialog open={sceneDialogOpen} onOpenChange={open => {
