@@ -33,6 +33,8 @@ let flowKey = null;
 let callbackSecret = null;  // Auth secret for HTTP callback, received from server on WS connect
 let state = 'off'; // off | idle | running
 let manualDisconnect = false;
+let remoteWorker = { enabled: false, controllerUrl: '', token: '', workerId: '' };
+let remoteWorkerBusy = false;
 let metrics = {
   tokenCapturedAt: null,
   requestCount: 0,   // captcha-consuming requests only (gen image/video/upscale)
@@ -57,6 +59,16 @@ function _classifyApiUrl(url) {
   if (url.includes('/media/'))                         return 'MEDIA';
   if (url.includes('/credits'))                        return 'CREDITS';
   return 'API';
+}
+
+function agentWsUrl() {
+  if (!remoteWorker.enabled || !remoteWorker.controllerUrl) return AGENT_WS_URL;
+  const url = new URL(remoteWorker.controllerUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.pathname = '/ws/extension';
+  url.search = `?token=${encodeURIComponent(remoteWorker.token)}`;
+  url.hash = '';
+  return url.toString();
 }
 
 // ─── Request Log ────────────────────────────────────────────
@@ -93,11 +105,13 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   await ensureInitialized();
   if (alarm.name === 'reconnect') connectToAgent();
   if (alarm.name === 'keepAlive') keepAlive();
+  if (alarm.name === 'remote-worker-poll') void pollRemoteWorker();
   if (alarm.name === 'token-refresh') {
     // Passive maintenance must never create browser tabs. If the user has no
     // Flow tab open, wait for an explicit action or an actual RPC to open one.
     await captureTokenFromFlowTab({ createIfMissing: false });
   }
+
 });
 
 function ensureInitialized() {
@@ -112,12 +126,61 @@ function ensureInitialized() {
 }
 
 async function initialize() {
-  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret']);
+  const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret', 'remoteWorker']);
   if (data.flowKey) flowKey = data.flowKey;
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
+  if (data.remoteWorker) remoteWorker = { ...remoteWorker, ...data.remoteWorker };
   connectToAgent();
   chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 });
+  chrome.alarms.create('remote-worker-poll', { periodInMinutes: 0.25 });
+}
+
+function remoteHeaders(extra = {}) {
+  return {
+    'X-Flowcommand-Worker-Token': remoteWorker.token,
+    ...extra,
+  };
+}
+
+async function pollRemoteWorker() {
+  if (!remoteWorker.enabled || remoteWorkerBusy || !remoteWorker.controllerUrl || !remoteWorker.token) return;
+  remoteWorkerBusy = true;
+  try {
+    const controller = remoteWorker.controllerUrl.replace(/\/$/, '');
+    const workerId = remoteWorker.workerId || chrome.runtime.id;
+    const response = await fetch(`${controller}/api/v1/worker/jobs/claim`, {
+      method: 'POST',
+      headers: remoteHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ worker_id: workerId }),
+    });
+    if (response.status === 204) return;
+    if (!response.ok) throw new Error(`REMOTE_CLAIM_${response.status}`);
+    const job = await response.json();
+    addRequestLog({
+      id: job.idjob, type: 'REMOTE_IMAGE', time: new Date().toISOString(),
+      status: 'processing', error: null, outputUrl: null, url: controller,
+      payloadSummary: job.prompt.slice(0, 200),
+    });
+    const generated = await fetch(`${controller}/api/v1/worker/jobs/${encodeURIComponent(job.idjob)}/generate`, {
+      method: 'POST',
+      headers: remoteHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ worker_id: workerId, lease_token: job.lease_token }),
+    });
+    const result = await generated.json().catch(() => ({}));
+    if (!generated.ok) throw new Error(result.detail || `REMOTE_GENERATE_${generated.status}`);
+    updateRequestLog(job.idjob, {
+      status: result.status === 'COMPLETED' ? 'success' : 'failed',
+      error: result.error || null,
+      outputUrl: result.image_url || null,
+      responseSummary: `attempt ${result.attempt_count || job.attempt_count}: ${result.status}`,
+    });
+  } catch (error) {
+    metrics.lastError = error?.message || 'REMOTE_WORKER_POLL_FAILED';
+    chrome.storage.local.set({ metrics });
+  } finally {
+    remoteWorkerBusy = false;
+  }
 }
 
 // MV3 workers can be suspended and restarted without onStartup firing.
@@ -207,7 +270,7 @@ function connectToAgent() {
   if (ws?.readyState === WebSocket.OPEN) return;
 
   try {
-    ws = new WebSocket(AGENT_WS_URL);
+    ws = new WebSocket(agentWsUrl());
   } catch (e) {
     console.error('[FlowAgent] WS connect error:', e);
     scheduleReconnect();
@@ -227,6 +290,7 @@ function connectToAgent() {
       type: 'extension_ready',
       flowKeyPresent: !!flowKey,
       extensionVersion: chrome.runtime.getManifest().version,
+      remoteWorkerId: remoteWorker.workerId || chrome.runtime.id,
       flowUrlSupported: chrome.runtime.getManifest().host_permissions?.includes('https://flow.google.com/*') === true,
       tokenAge: flowKey && metrics.tokenCapturedAt ? Date.now() - metrics.tokenCapturedAt : null,
     }));
@@ -814,6 +878,28 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
     manualDisconnect = true;
     if (ws) ws.close();
     reply({ ok: true });
+    return true;
+  }
+
+  if (msg.type === 'SET_REMOTE_WORKER_CONFIG') {
+    const next = msg.config || {};
+    remoteWorker = {
+      enabled: next.enabled === true,
+      controllerUrl: typeof next.controllerUrl === 'string' ? next.controllerUrl.replace(/\/$/, '') : '',
+      token: typeof next.token === 'string' ? next.token : '',
+      workerId: typeof next.workerId === 'string' ? next.workerId : '',
+    };
+    chrome.storage.local.set({ remoteWorker }).then(() => {
+      if (ws) ws.close();
+      manualDisconnect = false;
+      connectToAgent();
+      reply({ ok: true });
+    });
+    return true;
+  }
+
+  if (msg.type === 'REMOTE_WORKER_STATUS') {
+    reply({ enabled: remoteWorker.enabled, controllerUrl: remoteWorker.controllerUrl, workerId: remoteWorker.workerId });
     return true;
   }
 

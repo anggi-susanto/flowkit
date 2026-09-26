@@ -66,6 +66,80 @@
 
     #btn-panel:hover { background: var(--accent); }
 
+    #btn-settings {
+      padding: 4px 8px;
+      font-family: var(--font);
+      font-size: 9px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    #btn-settings:hover { border-color: var(--accent); color: #fff; }
+
+    #settings {
+      display: none;
+      padding: 12px;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+    }
+
+    #settings.open { display: block; }
+
+    .settings-title {
+      margin-bottom: 10px;
+      color: var(--text);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .setting-row { margin-bottom: 9px; }
+    .setting-row:last-of-type { margin-bottom: 10px; }
+
+    .setting-label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 9px;
+    }
+
+    .setting-input {
+      width: 100%;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+
+    .setting-input:focus { border-color: var(--accent); }
+
+    .setting-toggle { display: flex; align-items: center; gap: 7px; color: var(--text); cursor: pointer; }
+    .setting-toggle input { accent-color: var(--green); }
+
+    #settings-save {
+      width: 100%;
+      padding: 7px;
+      border: 0;
+      border-radius: 4px;
+      background: var(--accent-dim);
+      color: #fff;
+      font: 700 9px var(--font);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+
+    #settings-save:hover { background: var(--accent); }
+    #settings-status { min-height: 14px; margin-top: 7px; color: var(--muted); font-size: 9px; }
+    #settings-status.error { color: var(--red); }
+    #settings-status.ok { color: var(--green); }
+
     .log-header {
       display: flex;
       align-items: center;
@@ -230,8 +304,31 @@
 <body>
   <header>
     <div class="header-title"><span>Flow Kit</span> Extension</div>
+    <button id="btn-settings">Settings</button>
     <button id="btn-panel">Side Panel</button>
   </header>
+
+  <section id="settings" aria-label="Remote worker settings">
+    <div class="settings-title">Remote Worker</div>
+    <label class="setting-toggle">
+      <input id="remote-enabled" type="checkbox">
+      Enable FlowCommand remote mode
+    </label>
+    <div class="setting-row">
+      <label class="setting-label" for="controller-url">Controller URL</label>
+      <input id="controller-url" class="setting-input" type="url" placeholder="https://flowcommand.gunamaya.id" autocomplete="url">
+    </div>
+    <div class="setting-row">
+      <label class="setting-label" for="worker-id">Worker ID</label>
+      <input id="worker-id" class="setting-input" type="text" placeholder="chrome-flowcommand-01" maxlength="120">
+    </div>
+    <div class="setting-row">
+      <label class="setting-label" for="worker-token">Worker Token <span>leave blank to keep saved token</span></label>
+      <input id="worker-token" class="setting-input" type="password" placeholder="Not shown after saving" autocomplete="off">
+    </div>
+    <button id="settings-save">Save Remote Settings</button>
+    <div id="settings-status" role="status"></div>
+  </section>
 
   <div class="log-header">
     Recent Requests

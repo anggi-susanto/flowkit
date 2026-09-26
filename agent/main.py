@@ -2,14 +2,18 @@
 import asyncio
 import json
 import logging
+import secrets
 import signal
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs, urlparse
 
 import websockets
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, FLOWCOMMAND_CORS_ORIGINS, FLOWCOMMAND_DATABASE_URL, FLOWCOMMAND_WORKER_TOKEN, validate_flowcommand_config
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -24,12 +28,16 @@ from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
 from agent.api.active_project import router as active_project_router
+from agent.api.remote_jobs import router as remote_jobs_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
+from agent.services.remote_observability import request_context_middleware, prometheus_metrics
 from agent.services.event_bus import event_bus
 from agent.sdk import init_sdk
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,6 +45,13 @@ logger = logging.getLogger(__name__)
 
 async def ws_handler(websocket):
     """Handle a Chrome extension WebSocket connection."""
+    path = getattr(websocket, "path", "")
+    parsed = urlparse(path)
+    if parsed.path == "/ws/extension":
+        token = parse_qs(parsed.query).get("token", [""])[0]
+        if not FLOWCOMMAND_WORKER_TOKEN or not secrets.compare_digest(token, FLOWCOMMAND_WORKER_TOKEN):
+            await websocket.close(code=4401, reason="Unauthorized FlowCommand worker")
+            return
     client = get_flow_client()
     client.set_extension(websocket)
     logger.info("Extension connected from %s", websocket.remote_address)
@@ -72,6 +87,16 @@ async def run_ws_server():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    remote_maintenance_stop = None
+    remote_maintenance_task = None
+    if FLOWCOMMAND_DATABASE_URL:
+        from agent.services.remote_jobs import remote_job_store
+        from agent.services.remote_maintenance import run_maintenance
+        validate_flowcommand_config()
+        await remote_job_store.connect()
+        remote_maintenance_stop = asyncio.Event()
+        remote_maintenance_task = asyncio.create_task(run_maintenance(remote_maintenance_stop))
+        logger.info("FlowCommand remote job store connected")
 
     # Load custom materials from DB into in-memory registry
     from agent.db.crud import list_materials as db_list_materials
@@ -110,6 +135,12 @@ async def lifespan(app: FastAPI):
     ws_task.cancel()
     worker_task.cancel()
     await close_db()
+    if remote_maintenance_stop is not None and remote_maintenance_task is not None:
+        remote_maintenance_stop.set()
+        await remote_maintenance_task
+    if FLOWCOMMAND_DATABASE_URL:
+        from agent.services.remote_jobs import remote_job_store
+        await remote_job_store.close()
     logger.info("Flow Kit stopped")
 
 
@@ -117,7 +148,7 @@ app = FastAPI(title="Flow Kit", version="1.3.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(FLOWCOMMAND_CORS_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -160,6 +191,7 @@ app.include_router(music_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
+app.include_router(remote_jobs_router, prefix="/api")
 
 
 import secrets as _secrets
@@ -200,6 +232,29 @@ async def health():
         "extension_connected": client.connected,
         "ws": client.ws_stats,
     }
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe: dependencies required by the remote image API."""
+    if not FLOWCOMMAND_DATABASE_URL:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "remote database not configured"})
+    from agent.services.remote_jobs import remote_job_store
+    from agent.services.object_storage import object_storage
+    try:
+        pool = remote_job_store._require_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        await object_storage.check()
+        return {"status": "ready", "database": "ok", "storage": "ok"}
+    except Exception:
+        logger.exception("FlowCommand readiness check failed")
+        return JSONResponse(status_code=503, content={"status": "not_ready", "database": "unavailable"})
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    return PlainTextResponse(prometheus_metrics(), media_type="text/plain; version=0.0.4")
 
 
 # ─── Dashboard WebSocket ──────────────────────────────────────

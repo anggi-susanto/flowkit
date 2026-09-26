@@ -5,6 +5,7 @@ __pycache__/
 *.db-wal
 *.db-journal
 .env
+.venv/
 output/
 youtube
 agent/active_project.json
@@ -27,3 +28,5 @@ extension/_metadata/
 .omc/
 .agent/
 flow_session_project.json
+
+graphify-out

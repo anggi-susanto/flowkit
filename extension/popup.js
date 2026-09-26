@@ -132,6 +132,55 @@ document.getElementById('btn-panel').addEventListener('click', () => {
   });
 });
 
+const settings = document.getElementById('settings');
+const remoteEnabled = document.getElementById('remote-enabled');
+const controllerUrl = document.getElementById('controller-url');
+const workerId = document.getElementById('worker-id');
+const workerToken = document.getElementById('worker-token');
+const settingsStatus = document.getElementById('settings-status');
+
+function setSettingsStatus(text, kind = '') {
+  settingsStatus.textContent = text;
+  settingsStatus.className = kind;
+}
+
+async function loadRemoteSettings() {
+  const { remoteWorker = {} } = await chrome.storage.local.get('remoteWorker');
+  remoteEnabled.checked = remoteWorker.enabled === true;
+  controllerUrl.value = remoteWorker.controllerUrl || '';
+  workerId.value = remoteWorker.workerId || '';
+  workerToken.value = '';
+  if (remoteWorker.token) workerToken.placeholder = 'Saved token — leave blank to keep';
+}
+
+document.getElementById('btn-settings').addEventListener('click', async () => {
+  settings.classList.toggle('open');
+  if (settings.classList.contains('open')) await loadRemoteSettings();
+});
+
+document.getElementById('settings-save').addEventListener('click', async () => {
+  const { remoteWorker: existing = {} } = await chrome.storage.local.get('remoteWorker');
+  const config = {
+    enabled: remoteEnabled.checked,
+    controllerUrl: controllerUrl.value.trim().replace(/\/$/, ''),
+    workerId: workerId.value.trim(),
+    token: workerToken.value.trim() || existing.token || '',
+  };
+  if (config.enabled && (!/^https:\/\//.test(config.controllerUrl) || !config.token || !config.workerId)) {
+    setSettingsStatus('Remote mode needs HTTPS URL, Worker ID, and token.', 'error');
+    return;
+  }
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'SET_REMOTE_WORKER_CONFIG', config });
+    if (!result?.ok) throw new Error(result?.error || 'Unable to save settings');
+    workerToken.value = '';
+    workerToken.placeholder = 'Saved token — leave blank to keep';
+    setSettingsStatus(config.enabled ? 'Saved. Reconnecting to FlowCommand…' : 'Saved. Local mode enabled.', 'ok');
+  } catch (error) {
+    setSettingsStatus(error.message || 'Unable to save settings', 'error');
+  }
+});
+
 chrome.runtime.sendMessage({ type: 'REQUEST_LOG' }, (data) => {
   if (chrome.runtime.lastError) return;
   if (data && data.log) renderLog(data.log);

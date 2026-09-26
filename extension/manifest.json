@@ -17,7 +17,8 @@
     "https://flow-content.google/*",
     "https://labs.google/*",
     "https://aisandbox-pa.googleapis.com/*",
-    "http://127.0.0.1:8100/*"
+    "http://127.0.0.1:8100/*",
+    "https://flowcommand.gunamaya.id/*"
   ],
   "background": {
     "service_worker": "background.js"

@@ -1,6 +1,7 @@
 """Configuration constants."""
 import json
 import os
+from urllib.parse import quote_plus
 from pathlib import Path
 
 # ─── Paths ───────────────────────────────────────────────────
@@ -10,6 +11,71 @@ DB_PATH = BASE_DIR / "flow_agent.db"
 # ─── API Server ──────────────────────────────────────────────
 API_HOST = os.environ.get("API_HOST", "127.0.0.1")
 API_PORT = int(os.environ.get("API_PORT", "8100"))
+
+# ─── FlowCommand remote image jobs ───────────────────────────
+# These are intentionally opt-in so the existing local SQLite workflow keeps
+# working when the remote service is not configured.
+_pg_host = os.environ.get("FLOWCOMMAND_PG_HOST", os.environ.get("DB_HOST", "10.0.0.15"))
+_pg_port = os.environ.get("FLOWCOMMAND_PG_PORT", os.environ.get("DB_PORT", "5432"))
+_pg_database = os.environ.get("FLOWCOMMAND_PG_DATABASE", os.environ.get("DB_DATABASE", "flowcommand"))
+_pg_user = os.environ.get("FLOWCOMMAND_PG_USER", os.environ.get("DB_USERNAME", ""))
+_pg_password = os.environ.get("FLOWCOMMAND_PG_PASSWORD", os.environ.get("DB_PASSWORD", ""))
+FLOWCOMMAND_DATABASE_URL = os.environ.get(
+    "FLOWCOMMAND_DATABASE_URL",
+    f"postgresql://{quote_plus(_pg_user)}:{quote_plus(_pg_password)}@{_pg_host}:{_pg_port}/{_pg_database}"
+    if _pg_user and _pg_password else "",
+)
+FLOWCOMMAND_PUBLIC_BASE_URL = os.environ.get("FLOWCOMMAND_PUBLIC_BASE_URL", "").rstrip("/")
+FLOWCOMMAND_CLIENT_USERNAME = os.environ.get("FLOWCOMMAND_CLIENT_USERNAME", "")
+FLOWCOMMAND_CLIENT_PASSWORD = os.environ.get("FLOWCOMMAND_CLIENT_PASSWORD", "")
+FLOWCOMMAND_WORKER_TOKEN = os.environ.get("FLOWCOMMAND_WORKER_TOKEN", "")
+FLOWCOMMAND_CORS_ORIGINS = tuple(
+    origin.strip() for origin in os.environ.get("FLOWCOMMAND_CORS_ORIGINS", FLOWCOMMAND_PUBLIC_BASE_URL).split(",")
+    if origin.strip()
+)
+FLOWCOMMAND_RATE_LIMIT_WINDOW_SECONDS = max(1, int(os.environ.get("FLOWCOMMAND_RATE_LIMIT_WINDOW_SECONDS", "60")))
+FLOWCOMMAND_CLIENT_RATE_LIMIT = max(1, int(os.environ.get("FLOWCOMMAND_CLIENT_RATE_LIMIT", "30")))
+FLOWCOMMAND_WORKER_RATE_LIMIT = max(1, int(os.environ.get("FLOWCOMMAND_WORKER_RATE_LIMIT", "120")))
+FLOWCOMMAND_JOB_LEASE_SECONDS = max(60, int(os.environ.get("FLOWCOMMAND_JOB_LEASE_SECONDS", "900")))
+FLOWCOMMAND_MAX_ATTEMPTS = 3
+FLOWCOMMAND_UNUSUAL_ACTIVITY_RETRY_SECONDS = max(120, int(os.environ.get("FLOWCOMMAND_UNUSUAL_ACTIVITY_RETRY_SECONDS", "125")))
+FLOWCOMMAND_UNUSUAL_ACTIVITY_RETRY_SECONDS = max(120, int(os.environ.get("FLOWCOMMAND_UNUSUAL_ACTIVITY_RETRY_SECONDS", "125")))
+FLOWCOMMAND_MAX_PROMPT_LENGTH = max(1, int(os.environ.get("FLOWCOMMAND_MAX_PROMPT_LENGTH", "4000")))
+FLOWCOMMAND_MAX_IMAGE_BYTES = max(1024, int(os.environ.get("FLOWCOMMAND_MAX_IMAGE_BYTES", str(15 * 1024 * 1024))))
+FLOWCOMMAND_RECOVERY_INTERVAL_SECONDS = max(10, int(os.environ.get("FLOWCOMMAND_RECOVERY_INTERVAL_SECONDS", "60")))
+FLOWCOMMAND_RETENTION_DAYS = max(1, int(os.environ.get("FLOWCOMMAND_RETENTION_DAYS", "30")))
+FLOWCOMMAND_CLEANUP_INTERVAL_SECONDS = max(300, int(os.environ.get("FLOWCOMMAND_CLEANUP_INTERVAL_SECONDS", "86400")))
+FLOWCOMMAND_CLEANUP_BATCH_SIZE = min(1000, max(1, int(os.environ.get("FLOWCOMMAND_CLEANUP_BATCH_SIZE", "100"))))
+FLOWCOMMAND_S3_ENDPOINT = os.environ.get("FLOWCOMMAND_S3_ENDPOINT", "https://s3.gunamaya.id")
+FLOWCOMMAND_S3_REGION = os.environ.get("FLOWCOMMAND_S3_REGION", "eu-west-2")
+FLOWCOMMAND_S3_BUCKET = os.environ.get("FLOWCOMMAND_S3_BUCKET", "centracast")
+FLOWCOMMAND_S3_PREFIX = os.environ.get("FLOWCOMMAND_S3_PREFIX", "flowcommand/").strip("/") + "/"
+FLOWCOMMAND_S3_ACCESS_KEY = os.environ.get("FLOWCOMMAND_S3_ACCESS_KEY", "")
+FLOWCOMMAND_S3_SECRET_KEY = os.environ.get("FLOWCOMMAND_S3_SECRET_KEY", "")
+FLOWCOMMAND_S3_PATH_STYLE = os.environ.get("FLOWCOMMAND_S3_PATH_STYLE", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_flowcommand_config() -> None:
+    """Fail fast for an accidentally partial or insecure remote deployment."""
+    if not FLOWCOMMAND_DATABASE_URL:
+        raise RuntimeError("FLOWCOMMAND_DATABASE_URL or PostgreSQL FLOWCOMMAND_PG_* credentials are required")
+    required = {
+        "FLOWCOMMAND_PUBLIC_BASE_URL": FLOWCOMMAND_PUBLIC_BASE_URL,
+        "FLOWCOMMAND_CLIENT_USERNAME": FLOWCOMMAND_CLIENT_USERNAME,
+        "FLOWCOMMAND_CLIENT_PASSWORD": FLOWCOMMAND_CLIENT_PASSWORD,
+        "FLOWCOMMAND_WORKER_TOKEN": FLOWCOMMAND_WORKER_TOKEN,
+        "FLOWCOMMAND_S3_ACCESS_KEY": FLOWCOMMAND_S3_ACCESS_KEY,
+        "FLOWCOMMAND_S3_SECRET_KEY": FLOWCOMMAND_S3_SECRET_KEY,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(f"Missing FlowCommand configuration: {', '.join(missing)}")
+    if not FLOWCOMMAND_PUBLIC_BASE_URL.startswith("https://"):
+        raise RuntimeError("FLOWCOMMAND_PUBLIC_BASE_URL must use HTTPS")
+    if len(FLOWCOMMAND_CLIENT_PASSWORD) < 20 or len(FLOWCOMMAND_WORKER_TOKEN) < 32:
+        raise RuntimeError("FlowCommand credentials do not meet minimum length requirements")
+    if not FLOWCOMMAND_S3_PREFIX.startswith("flowcommand/"):
+        raise RuntimeError("FLOWCOMMAND_S3_PREFIX must remain under flowcommand/")
 
 # ─── WebSocket Server (extension connects here) ─────────────
 WS_HOST = os.environ.get("WS_HOST", "127.0.0.1")

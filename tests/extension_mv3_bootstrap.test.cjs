@@ -118,6 +118,7 @@ setImmediate(async () => {
 
   assert.equal(socket.messages[0].type, 'extension_ready');
   assert.equal(socket.messages[0].flowKeyPresent, true);
+
   assert.equal(socket.messages[0].extensionVersion, '0.3.1');
   assert.equal(socket.messages[0].flowUrlSupported, true);
   assert.ok(socket.messages[0].tokenAge > 0);

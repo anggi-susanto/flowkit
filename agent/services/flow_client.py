@@ -56,6 +56,7 @@ class FlowClient:
     def __init__(self):
         self._extension_ws = None  # Active authenticated extension connection
         self._extensions: dict[object, dict] = {}
+        self._remote_workers: dict[str, object] = {}
         self._pending: dict[str, asyncio.Future] = {}
         self._pending_ws: dict[str, object] = {}
         self._flow_key: Optional[str] = None
@@ -108,6 +109,9 @@ class FlowClient:
             return
 
         self._extensions.pop(disconnected_ws, None)
+        for worker_id, worker_ws in list(self._remote_workers.items()):
+            if worker_ws is disconnected_ws:
+                self._remote_workers.pop(worker_id, None)
         self._ws_disconnect_count += 1
         self._ws_last_disconnect_at = time.time()
 
@@ -168,6 +172,17 @@ class FlowClient:
             reverse=True,
         )
         return [item["ws"] for item in candidates]
+
+    def bind_remote_worker(self, worker_id: str, ws) -> None:
+        if worker_id and ws in self._extensions:
+            self._remote_workers[worker_id] = ws
+
+    def remote_worker_connected(self, worker_id: str) -> bool:
+        return self._remote_workers.get(worker_id) in self._extensions
+
+    def remote_worker_extension(self, worker_id: str):
+        ws = self._remote_workers.get(worker_id)
+        return ws if ws in self._extensions else None
 
     def _select_extension(self, require_token: bool):
         """Choose the preferred authenticated or connected extension."""
@@ -264,6 +279,7 @@ class FlowClient:
             if source_ws is not None and source_ws in self._extensions:
                 self._extensions[source_ws]["extension_version"] = version
                 self._extensions[source_ws]["flow_url_supported"] = flow_supported
+                self.bind_remote_worker(str(data.get("remoteWorkerId") or ""), source_ws)
             logger.info(
                 "Extension ready, flowKey=%s version=%s flow.google.com=%s",
                 "yes" if data.get("flowKeyPresent") else "no",
@@ -434,7 +450,7 @@ class FlowClient:
                     refreshed, len(targets), project_id[:12])
         return {"refreshed": refreshed, "found": len(targets)}
 
-    async def _send(self, method: str, params: dict, timeout: float = 300) -> dict:
+    async def _send(self, method: str, params: dict, timeout: float = 300, preferred_extension=None) -> dict:
         """Send request to extension and wait for response.
 
         Always returns a dict. On error, returns {"error": "<reason>"} — callers
@@ -447,7 +463,7 @@ class FlowClient:
         # No profile needs a bearer any more: batchexecute authenticates in the
         # page with the session cookie. Demanding a flow key here would reject
         # every profile, because none on this path ever captures one.
-        extension_candidates = self._extension_candidates(require_token=False)
+        extension_candidates = [preferred_extension] if preferred_extension in self._extensions else self._extension_candidates(require_token=False)
         if not extension_candidates:
             return {"error": "Extension not connected"}
 
@@ -505,7 +521,7 @@ class FlowClient:
     async def batch_rpc(self, rpcid: str, freq: str,
                         captcha_action: str | None = None,
                         match: str | None = None,
-                        timeout: float = 300) -> dict:
+                        timeout: float = 300, preferred_extension=None) -> dict:
         """Run one batchexecute RPC in the Flow page. Returns the raw body.
 
         CAPTCHA-bearing image/video submits pass through one process-wide guard
@@ -520,7 +536,9 @@ class FlowClient:
 
         is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
         if not is_generation:
-            return await self._send("batch_rpc", params, timeout=timeout)
+            if preferred_extension is None:
+                return await self._send("batch_rpc", params, timeout=timeout)
+            return await self._send("batch_rpc", params, timeout=timeout, preferred_extension=preferred_extension)
 
         now = time.monotonic()
         if now < self._generation_unusual_until:
@@ -553,7 +571,10 @@ class FlowClient:
                     await asyncio.sleep(delay)
                 self._generation_last_submit_at = time.monotonic()
 
-            result = await self._send("batch_rpc", params, timeout=timeout)
+                if preferred_extension is None:
+                    result = await self._send("batch_rpc", params, timeout=timeout)
+                else:
+                    result = await self._send("batch_rpc", params, timeout=timeout, preferred_extension=preferred_extension)
             blob = f"{result.get('error', '')} {result.get('data', '')}"
             is_hijack = "extension_hijack" in blob.lower()
             is_unusual = (
@@ -597,9 +618,12 @@ class FlowClient:
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
-                             timeout: float = 300):
+                             timeout: float = 300, preferred_extension=None):
         """One RPC, unwrapped to its inner payload. Raises on anything else."""
-        result = await self.batch_rpc(rpcid, freq, captcha_action, timeout=timeout)
+        if preferred_extension is None:
+            result = await self.batch_rpc(rpcid, freq, captcha_action, timeout=timeout)
+        else:
+            result = await self.batch_rpc(rpcid, freq, captcha_action, timeout=timeout, preferred_extension=preferred_extension)
         if result.get("error"):
             raise fb.FlowBatchError(f"{rpcid}: {result['error']}")
         return fb.first_payload(result.get("data") or "", rpcid)
@@ -680,7 +704,8 @@ class FlowClient:
                                image_model: str = None,
                                count: int = 1,
                                seed: int | None = None,
-                               base_media_id: str | None = None) -> dict:
+                               base_media_id: str | None = None,
+                               preferred_extension=None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -704,9 +729,13 @@ class FlowClient:
                     prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
                     model=model, ref_media_ids=refs, base_media_id=base_media_id,
                 )
-                payload = await self._batch_payload(
-                    fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE
-                )
+                if preferred_extension is None:
+                    payload = await self._batch_payload(fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE)
+                else:
+                    payload = await self._batch_payload(
+                        fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE,
+                        preferred_extension=preferred_extension,
+                    )
                 generated = fb.read_images(payload)
                 if not generated:
                     raise fb.FlowBatchError("Image generation returned no media url")
