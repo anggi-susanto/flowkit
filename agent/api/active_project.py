@@ -8,11 +8,12 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from agent.db import crud
+from agent.config import BASE_DIR
 
 router = APIRouter(prefix="/api/active-project", tags=["active-project"])
 logger = logging.getLogger(__name__)
 
-_STATE_FILE = Path(__file__).parent.parent / "active_project.json"
+_STATE_FILE = BASE_DIR / "active_project.json"
 
 
 def _read_state() -> dict | None:
@@ -29,14 +30,14 @@ def _read_state() -> dict | None:
 def _write_state(data: dict):
     """Atomic write — temp file + os.replace to avoid partial reads."""
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=_STATE_FILE.parent, suffix=".tmp")
     try:
-        os.write(fd, content.encode("utf-8"))
-        os.close(fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
         os.replace(tmp, _STATE_FILE)
     except BaseException:
-        os.close(fd)
-        os.unlink(tmp)
+        Path(tmp).unlink(missing_ok=True)
         raise
 
 

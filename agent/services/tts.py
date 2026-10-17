@@ -42,12 +42,20 @@ def _to_wav_tensor(item, sample_rate):
     return torch.cat([w, pad], dim=1)
 """
 
-# Inline script template for TTS generation via subprocess
-_TTS_SCRIPT = """
-import sys, json, torch, torchaudio
+# Import failures include incompatible torch/torchaudio native libraries, not just
+# missing packages. Keep the check in the selected interpreter, not the API venv.
+_TTS_IMPORTS = """
+import sys, json
+try:
+    import torch, torchaudio
+    from omnivoice import OmniVoice
+except Exception as exc:
+    raise RuntimeError("TTS dependencies unavailable: " + str(exc)) from exc
+"""
 
+# Inline script template for TTS generation via subprocess
+_TTS_SCRIPT = _TTS_IMPORTS + """
 args = json.loads(sys.argv[1])
-from omnivoice import OmniVoice
 """ + _TO_WAV_TENSOR + """
 model = OmniVoice.from_pretrained(
     args["model"], device_map=args.get("device", "cpu"), dtype=torch.float32)
@@ -67,12 +75,10 @@ print(json.dumps({"ok": True, "path": args["output"]}))
 """
 
 # Batch script — loads model once, generates for multiple texts
-_TTS_BATCH_SCRIPT = """
-import sys, json, torch, torchaudio
+_TTS_BATCH_SCRIPT = _TTS_IMPORTS + """
 from pathlib import Path
 
 args = json.loads(sys.argv[1])
-from omnivoice import OmniVoice
 """ + _TO_WAV_TENSOR + """
 model = OmniVoice.from_pretrained(
     args["model"], device_map=args.get("device", "cpu"), dtype=torch.float32)
@@ -139,12 +145,31 @@ async def generate_speech(
     return output_path
 
 
+def _invoke_tts(script: str, args: dict, timeout: int) -> subprocess.CompletedProcess:
+    """Run with actionable errors for an unconfigured local TTS environment."""
+    try:
+        proc = subprocess.run(
+            [PYTHON_BIN, "-c", script, json.dumps(args)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"TTS interpreter '{PYTHON_BIN}' was not found. Set TTS_PYTHON_BIN "
+            "to an existing Python interpreter in an environment with OmniVoice, "
+            "torch and torchaudio installed."
+        ) from exc
+    if proc.returncode != 0 and "TTS dependencies unavailable:" in (proc.stderr or ""):
+        raise RuntimeError(
+            f"TTS dependencies unavailable in '{PYTHON_BIN}'. Set TTS_PYTHON_BIN "
+            "to a prepared TTS environment, or install compatible OmniVoice, torch "
+            f"and torchaudio in that environment. Details: {proc.stderr[-500:]}"
+        )
+    return proc
+
+
 def _run_tts_subprocess(args: dict) -> dict:
     """Run TTS subprocess."""
-    proc = subprocess.run(
-        [PYTHON_BIN, "-c", _TTS_SCRIPT, json.dumps(args)],
-        capture_output=True, text=True, timeout=120,
-    )
+    proc = _invoke_tts(_TTS_SCRIPT, args, timeout=120)
     if proc.returncode != 0:
         return {"ok": False, "error": proc.stderr[-500:] if proc.stderr else "unknown error"}
     try:
@@ -271,10 +296,7 @@ async def generate_video_narration(
 def _run_batch_subprocess(args: dict) -> list[dict]:
     """Run batch TTS subprocess. Model loads once."""
     timeout = 180 + len(args.get("items", [])) * 45  # ~180s model load + ~45s per scene
-    proc = subprocess.run(
-        [PYTHON_BIN, "-c", _TTS_BATCH_SCRIPT, json.dumps(args)],
-        capture_output=True, text=True, timeout=timeout,
-    )
+    proc = _invoke_tts(_TTS_BATCH_SCRIPT, args, timeout=timeout)
     if proc.returncode != 0:
         error = proc.stderr[-500:] if proc.stderr else "unknown"
         return [{"id": item["id"], "ok": False, "error": error} for item in args["items"]]

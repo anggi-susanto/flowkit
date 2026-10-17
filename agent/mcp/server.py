@@ -346,11 +346,13 @@ def create_mcp() -> Any:
     @mcp.tool(name="flowkit_create_scene", description="Create a scene. Scene prompts should describe action, not character appearance.")
     async def create_scene(video_id: str, prompt: str, display_order: int = 0, image_prompt: str | None = None,
                            video_prompt: str | None = None, character_names: list[str] | None = None,
-                           chain_type: str = "ROOT", dry_run: bool = False) -> dict[str, Any]:
+                           chain_type: str = "ROOT", parent_scene_id: str | None = None,
+                           transition_prompt: str | None = None, dry_run: bool = False) -> dict[str, Any]:
         _require_scope(WRITE_SCOPE)
         body = {key: value for key, value in {"video_id": video_id, "prompt": prompt, "display_order": display_order,
                                                "image_prompt": image_prompt, "video_prompt": video_prompt,
-                                               "character_names": character_names, "chain_type": chain_type}.items() if value is not None}
+                                               "character_names": character_names, "chain_type": chain_type,
+                                               "parent_scene_id": parent_scene_id, "transition_prompt": transition_prompt}.items() if value is not None}
         body = _validated(SceneCreate, body)
         if dry_run: return {"dry_run": True, "operation": "create_scene", "body": body}
         return await _tool("flowkit_create_scene", flowkit_client.create_scene, scope=WRITE_SCOPE, body=body)
@@ -371,7 +373,6 @@ def create_mcp() -> Any:
         if image_model is not None:
             raise ValueError("Per-request image_model is unsupported by the durable queue; use admin model configuration")
         project_id, video_id = await _request_parent_ids(scene_id)
-        await _generation_dependencies(scene_id, project_id, orientation, "upscale")
         await _generation_dependencies(scene_id, project_id, orientation, "image")
         request_type = "REGENERATE_IMAGE" if regenerate else "GENERATE_IMAGE"
         body = {"type": request_type, "scene_id": scene_id, "project_id": project_id, "video_id": video_id,
@@ -408,6 +409,7 @@ def create_mcp() -> Any:
                                   dry_run: bool = False) -> dict[str, Any]:
         _require_scope(GENERATE_SCOPE)
         project_id, video_id = await _request_parent_ids(scene_id)
+        await _generation_dependencies(scene_id, project_id, orientation, "upscale")
         body = {key: value for key, value in {"type": "UPSCALE_VIDEO", "scene_id": scene_id, "project_id": project_id,
                                                "video_id": video_id, "orientation": orientation, "provider": provider}.items() if value is not None}
         if dry_run: return {"dry_run": True, "operation": "upscale_scene_video", "request": body}
@@ -490,6 +492,16 @@ def create_mcp() -> Any:
         if dry_run: return {"dry_run": True, "operation": "update_models", "updates": updates}
         return await _tool("flowkit_update_models", flowkit_client.patch, scope=ADMIN_SCOPE, path="/api/models", body=updates)
 
+    from agent.mcp.media import register_media_tools
+    from agent.mcp.workflows import register_workflow_tools
+    from agent.mcp.audio import register_audio_tools
+    from agent.mcp.lifecycle import register_lifecycle_tools
+    from agent.mcp.music import register_music_tools
+    register_media_tools(mcp)
+    register_workflow_tools(mcp)
+    register_audio_tools(mcp)
+    register_lifecycle_tools(mcp)
+    register_music_tools(mcp)
     return mcp
 
 
@@ -504,7 +516,7 @@ class AuthenticatedMCPApp:
     def __init__(self, app: Any, tokens: dict[str, MCPPrincipal] | None = None) -> None:
         self.app = app
         self.tokens = tokens if tokens is not None else configured_tokens()
-        self.max_body_bytes = max(1024, int(os.environ.get("FLOWKIT_MCP_MAX_BODY_BYTES", "1048576")))
+        self.max_body_bytes = max(1024, int(os.environ.get("FLOWKIT_MCP_MAX_BODY_BYTES", "12582912")))
         self.requests_per_minute = max(1, int(os.environ.get("FLOWKIT_MCP_REQUESTS_PER_MINUTE", "120")))
         self._requests: dict[str, deque[float]] = {}
 

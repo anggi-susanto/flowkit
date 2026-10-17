@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import re
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -10,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from agent.config import TTS_TEMPLATES_DIR, SHARED_OUTPUT_DIR, OUTPUT_DIR
 from agent.utils.slugify import slugify
 from agent.db.crud import get_video, list_scenes, get_project
+from agent.db import crud
 from agent.models.tts import (
     TTSGenerateRequest,
     TTSGenerateResponse,
@@ -162,6 +164,8 @@ async def narrate_video(vid: str, body: NarrateVideoRequest):
     video = await get_video(vid)
     if not video:
         raise HTTPException(404, "Video not found")
+    if video.get("project_id") != body.project_id:
+        raise HTTPException(400, "Video does not belong to the requested project")
 
     project = await get_project(body.project_id)
     if not project:
@@ -238,24 +242,47 @@ async def narrate_video(vid: str, body: NarrateVideoRequest):
             error=r.get("error"),
         )
 
-        # Mix narration into video if requested and both files exist
-        if body.mix and r["status"] == "COMPLETED" and r.get("audio_path"):
-            scene_data = next((s for s in scenes if s["id"] == r["scene_id"]), None)
-            if scene_data:
+        if body.mix and r["status"] == "COMPLETED":
+            try:
+                # Reuse concat's resolver for stored local, file:// and signed HTTP URLs.
+                from agent.api.videos import _resolve_media_local
+
+                scene_data = next((s for s in scenes if s["id"] == r["scene_id"]), None)
                 video_url_key = f"{orientation.lower()}_video_url"
-                video_path = scene_data.get(video_url_key)
-                if video_path and Path(video_path).exists():
-                    mixed_path = str(narrated_dir / f"scene_{r['display_order']:03d}_{r['scene_id']}_mixed.mp4")
-                    ok = add_narration(
+                video_url = (scene_data or {}).get(video_url_key)
+                if not video_url:
+                    raise RuntimeError(f"Missing {video_url_key} for scene")
+                if not r.get("audio_path") or not Path(r["audio_path"]).is_file():
+                    raise RuntimeError("Narration audio file is missing")
+                with tempfile.TemporaryDirectory(prefix="narration_") as tmpdir:
+                    video_path = await asyncio.to_thread(
+                        _resolve_media_local, video_url, Path(tmpdir))
+                    if not video_path:
+                        raise RuntimeError(f"Could not resolve {video_url_key} to a local clip")
+                    mixed_path = (narrated_dir / f"scene_{r['display_order']:03d}_{r['scene_id']}_mixed.mp4").resolve()
+                    ok = await asyncio.to_thread(
+                        add_narration,
                         video_path=video_path,
                         narration_path=r["audio_path"],
-                        output_path=mixed_path,
+                        output_path=str(mixed_path),
                         sfx_volume=body.sfx_volume,
                     )
-                    if ok:
-                        logger.info("Mixed narration for scene %s -> %s", r["scene_id"], mixed_path)
-                    else:
-                        logger.warning("Narration mix failed for scene %s", r["scene_id"])
+                    if not ok or not mixed_path.is_file():
+                        raise RuntimeError("Narration mixer failed to produce a video")
+                    mixed_url = mixed_path.as_uri()
+                    updated = await crud.update_scene(r["scene_id"], **{video_url_key: mixed_url})
+                    if not updated:
+                        raise RuntimeError("Scene disappeared while saving narration mix")
+                    result.mixed_video_url = mixed_url
+                    result.mix_status = "COMPLETED"
+                    logger.info("Mixed narration for scene %s -> %s", r["scene_id"], mixed_path)
+            except Exception as exc:
+                logger.exception("Narration mix failed for scene %s", r["scene_id"])
+                result.status = "FAILED"
+                result.mix_status = "FAILED"
+                result.error = f"Narration mix failed: {exc}"
+        elif body.mix and r["status"] == "FAILED":
+            result.mix_status = "FAILED"
 
         scene_results.append(result)
 

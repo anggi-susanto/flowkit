@@ -44,6 +44,8 @@ class SceneNarrationResult(BaseModel):
     duration: Optional[float] = None
     status: str  # COMPLETED, SKIPPED, FAILED
     error: Optional[str] = None
+    mixed_video_url: Optional[str] = None
+    mix_status: Literal["COMPLETED", "SKIPPED", "FAILED"] = "SKIPPED"
 
 
 class NarrateVideoResponse(BaseModel):

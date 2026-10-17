@@ -1,6 +1,6 @@
 # FlowKit MCP operations
 
-Status (2026-10-17): **deployed, read-only credential enabled** at `https://flowcommand.gunamaya.id/mcp/`. SSH connectivity recovered. Container health, PostgreSQL/storage readiness, extension reconnection, local/public SDK initialize and 33-tool discovery, list_models, read-only mutation denial, unauthenticated/invalid-token rejection, foreign-Origin rejection, and existing FlowCommand Basic Auth isolation passed. No billable media was submitted.
+Status (2026-10-17): **33-tool release deployed** at `https://flowcommand.gunamaya.id/mcp/`; **66-tool workflow expansion pending deployment**. The existing production token has `read+write+generate+remote_jobs`, verified after recreation. Initial deployment checks covered readiness, extension reconnection, public SDK discovery, authentication, scope denial and legacy Basic Auth isolation. No billable media was submitted as a deployment test.
 
 Deployment backup: `~/flowcommand-backups/20261017T065019Z/` on `10.0.0.23`; rollback image: `flowcommand-rollback:20261017T065019Z`. Source, previous environment, and runtime were backed up before deployment. Dedicated read-only credential is stored server-side at `~/flowcommand/.mcp-reader-token` (mode 600), never in this repository. Existing Compose ports, PostgreSQL/MinIO credentials, and worker credentials were preserved. No proxy configuration was changed; the existing proxy already forwards MCP correctly.
 
@@ -39,7 +39,7 @@ Scopes:
 
 **Shared workspace:** core FlowKit authoring/read tools operate in a shared trusted workspace. They do not provide per-project tenant isolation. Only the FlowCommand image-job bridge has MCP-subject ownership isolation. Do not issue these scopes to mutually untrusted tenants.
 
-Rate limits are per subject, per process, and include protocol discovery/initialization; all scopes share a budget. Configure an edge limit for unauthenticated requests, concurrent connections, slow uploads, and aggregate limits across replicas. Body buffering is bounded to 1 MiB by default. Image output is bounded to 20 MiB.
+Rate limits are per subject, per process, and include protocol discovery/initialization; all scopes share a budget. Configure an edge limit for unauthenticated requests, concurrent connections, slow uploads, and aggregate limits across replicas. Body buffering defaults to 12 MiB in the pending expansion (1 MiB in the initial release). Image output is bounded to 20 MiB.
 
 ## Public reverse proxy
 
@@ -81,7 +81,7 @@ Remote client configuration (exact keys vary by client):
 
 ## Tools and contracts
 
-33 tools currently share a registry:
+The initial deployed 33 tools share a registry (pending expansion adds 33 more):
 
 - Health, models, materials, projects/get-project, videos, scenes, characters, requests/get-request, provider status, credit status.
 - Project create/update, character create/build/update/attach/reference generation, video create, scene create/update, get-active-project.
@@ -101,7 +101,7 @@ Audit events record tool/subject/outcome/duration, not arguments or credential m
 
 - No per-request image_model override: explicitly rejected, not silently ignored. Use admin global settings or existing direct REST workflows privately. Project video_model_family selects the existing Veo/Omni worker route.
 - No generic N video variants, direct Omni duration/resolution tool, or tenant-specific FlowKit project ownership.
-- Active project is read-only through MCP; upstream persistence writes into the source tree and is incompatible with the read-only production image. A safe runtime-backed setter needs upstream work first.
+- Active project in the deployed initial release is read-only. The pending expansion adds runtime-backed set/clear tools and fixes persistence for the read-only image.
 - Queue batch insertion is not transactional and its deduplication is not concurrency-safe. A backend timeout can hide partially accepted requests; inspect list_requests before retrying. MCP does not claim exactly-once core queue submission or structured partial-failure results for backend transport failures.
 - Provider readiness, tier enforcement, and actual model support ultimately remain backend responsibilities. Discovery is available; dependency validation is not a guarantee that the external provider will accept a job.
 - Review supports `light`/`deep`. Run light review before upscale and repair failing scenes (score below 7.5, at most two review/regenerate cycles). MCP does not yet persist/enforce a review approval gate automatically.
@@ -131,3 +131,14 @@ node tests/extension_mv3_bootstrap.test.cjs
 ```
 
 Optional local wrapper: `python -m agent.mcp.server --transport stdio`. It shares the registry and defaults to `read`; explicit local scopes use `FLOWKIT_MCP_STDIO_SCOPES=read,write,generate`. The CLI intentionally cannot launch an unguarded HTTP server.
+
+
+## Pending workflow expansion (not deployed)
+
+Local implementation now registers 66 tools, including bytes upload/binding, scene edits, lifecycle, runtime active-project, concat/finalize, voice/narration, and Suno workflows. Deploy is blocked by `Network is unreachable` to SSH as of the latest attempt. Existing production may still expose only the previous 33 tools; verify tools/list before using the new workflow.
+
+New dependency: Pillow for validating actual image bytes. Default MCP body limit becomes 12 MiB for raw base64 images up to 8 MiB; configure `FLOWKIT_MCP_MAX_BODY_BYTES=12582912` and proxy `client_max_body_size 12m`. Do not overwrite an intentionally smaller security limit without operator approval. FFmpeg is included in the updated Dockerfile to support finishing. `FLOWKIT_MCP_OPERATION_TIMEOUT_S` sets synchronous upload/audio/finishing timeout (default 120, maximum 600); align client/proxy timeout.
+
+Active project state moves to `FLOW_AGENT_DIR/active_project.json` in the writable runtime volume. Existing explicit selection in source-tree state is not automatically migrated; fallback remains most recent project until set again. Local TTS dependencies/model are deliberately not bundled: provide a compatible prepared interpreter via TTS_PYTHON_BIN; missing engines fail explicitly. Narration validates video/project relationship and persists successful mixed clips for concat; failed mixing is reported as failed scenes.
+
+Idle checks before image binding are best-effort, not a lock shared with concurrent generation submissions. Run one authoring agent per resource during replacement until backend revision/transaction protection exists. Upload+binding is not atomic; upload UUID is returned alongside per-target errors to allow safe binding retry. Existing signed image URLs are cleared on replacement; use Flow provider or get_media/refresh workflow rather than expecting URL-based assistant generation to consume a UUID without resolving it.

@@ -36,7 +36,11 @@ class FlowKitClient:
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         if not re.fullmatch(r"/[a-zA-Z0-9_/-]+", path) or "//" in path:
             raise ValueError("Invalid API path")
-        async with httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout) as client:
+        long_operation = path.endswith(("/concat", "/finalize", "/narrate")) or path in {
+            "/api/tts/templates", "/api/tts/generate", "/api/flow/upload-image",
+        }
+        timeout = max(self.timeout, min(600, float(os.environ.get("FLOWKIT_MCP_OPERATION_TIMEOUT_S", "120")))) if method == "POST" and long_operation else self.timeout
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=timeout) as client:
             response = await client.request(method, path, **kwargs)
         if response.status_code >= 400:
             raise FlowKitAPIError(f"FlowKit request returned HTTP {response.status_code}")
