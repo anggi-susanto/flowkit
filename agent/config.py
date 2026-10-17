@@ -54,6 +54,18 @@ FLOWCOMMAND_S3_ACCESS_KEY = os.environ.get("FLOWCOMMAND_S3_ACCESS_KEY", "")
 FLOWCOMMAND_S3_SECRET_KEY = os.environ.get("FLOWCOMMAND_S3_SECRET_KEY", "")
 FLOWCOMMAND_S3_PATH_STYLE = os.environ.get("FLOWCOMMAND_S3_PATH_STYLE", "1").strip().lower() in {"1", "true", "yes", "on"}
 
+# ─── MCP surface ───────────────────────────────────────────────────────────
+# Remote MCP credentials are intentionally separate from FlowCommand client and
+# worker credentials. Entries use `secret:scope+scope`, separated by commas.
+FLOWKIT_MCP_ENABLED = os.environ.get("FLOWKIT_MCP_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+FLOWKIT_MCP_TOKENS = os.environ.get("FLOWKIT_MCP_TOKENS", "")
+FLOWKIT_MCP_HTTP_TIMEOUT_S = max(1.0, float(os.environ.get("FLOWKIT_MCP_HTTP_TIMEOUT_S", "20")))
+FLOWKIT_MCP_POLL_INTERVAL_S = max(0.1, float(os.environ.get("FLOWKIT_MCP_POLL_INTERVAL_S", "1")))
+FLOWKIT_MCP_WAIT_MAX_S = min(600, max(1, int(os.environ.get("FLOWKIT_MCP_WAIT_MAX_S", "120"))))
+FLOWKIT_MCP_STDIO_SCOPES = frozenset(
+    scope.strip() for scope in os.environ.get("FLOWKIT_MCP_STDIO_SCOPES", "read").split(",") if scope.strip()
+)
+
 
 def validate_flowcommand_config() -> None:
     """Fail fast for an accidentally partial or insecure remote deployment."""

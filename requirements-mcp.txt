@@ -1,0 +1,4 @@
+# Optional FlowKit MCP surface dependencies.
+# Install only on hosts exposing the MCP server:
+#   pip install -r requirements.txt -r requirements-mcp.txt
+mcp>=1.30,<2

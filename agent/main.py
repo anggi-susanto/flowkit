@@ -5,15 +5,16 @@ import logging
 import secrets
 import signal
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, FLOWCOMMAND_CORS_ORIGINS, FLOWCOMMAND_DATABASE_URL, FLOWCOMMAND_WORKER_TOKEN, validate_flowcommand_config
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, FLOWCOMMAND_CORS_ORIGINS, FLOWCOMMAND_DATABASE_URL, FLOWCOMMAND_WORKER_TOKEN, FLOWKIT_MCP_ENABLED, FLOWKIT_MCP_TOKENS, validate_flowcommand_config
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
 from agent.api.projects import router as projects_router
@@ -129,7 +130,11 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(controller.start())
     logger.info("WS server + worker started")
 
-    yield
+    if FLOWKIT_MCP_ENABLED:
+        async with mcp_server.session_manager.run():
+            yield
+    else:
+        yield
 
     controller.request_shutdown()
     await controller.drain()
@@ -194,6 +199,19 @@ app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
 app.include_router(remote_jobs_router, prefix="/api")
+
+if FLOWKIT_MCP_ENABLED:
+    if not FLOWKIT_MCP_TOKENS:
+        raise RuntimeError("FLOWKIT_MCP_ENABLED requires FLOWKIT_MCP_TOKENS")
+    try:
+        from agent.mcp.server import AuthenticatedMCPApp, create_mcp, configured_tokens
+        if not configured_tokens():
+            raise RuntimeError("FLOWKIT_MCP_TOKENS contains no valid scoped credentials")
+        mcp_server = create_mcp()
+        app.mount("/mcp", AuthenticatedMCPApp(mcp_server.streamable_http_app()))
+        logger.info("FlowKit MCP Streamable HTTP surface mounted at /mcp")
+    except ImportError as exc:
+        raise RuntimeError("FLOWKIT_MCP_ENABLED requires: pip install -r requirements-mcp.txt") from exc
 
 
 import secrets as _secrets
@@ -440,6 +458,15 @@ async def ext_get_netlog():
     return {"captures": lines}
 
 
+
+
+@app.get("/mcp-guide.md", include_in_schema=False)
+async def mcp_guide():
+    return FileResponse(
+        Path(__file__).resolve().parent.parent / "docs" / "FLOWCOMMAND_MCP_GUIDE.md",
+        media_type="text/markdown; charset=utf-8",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=300"},
+    )
 
 
 @app.get("/health")
