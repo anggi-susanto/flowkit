@@ -521,6 +521,7 @@ class FlowClient:
     async def batch_rpc(self, rpcid: str, freq: str,
                         captcha_action: str | None = None,
                         match: str | None = None,
+                        custom_path: str | None = None,
                         timeout: float = 300, preferred_extension=None) -> dict:
         """Run one batchexecute RPC in the Flow page. Returns the raw body.
 
@@ -533,6 +534,8 @@ class FlowClient:
             params["captchaAction"] = captcha_action
         if match:
             params["match"] = match
+        if custom_path:
+            params["customPath"] = custom_path
 
         is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
         if not is_generation:
@@ -616,6 +619,18 @@ class FlowClient:
         finally:
             self._generation_slots.release()
 
+    async def stream_chat(self, prompt: str, project_id: str | None = None, timeout: float = 120) -> dict:
+        """Submit a prompt via FlowCreationAgentService/StreamChat."""
+        pid = self._batch_project_id(project_id)
+        freq = fb.stream_chat_request(prompt, pid)
+        return await self.batch_rpc(
+            "StreamChat",
+            freq,
+            captcha_action="CHAT_GENERATION",
+            custom_path=fb.STREAM_CHAT_PATH,
+            timeout=timeout,
+        )
+
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
                              timeout: float = 300, preferred_extension=None):
@@ -667,11 +682,9 @@ class FlowClient:
             return
         if len(self._operation_projects) > 512:
             self._operation_projects.clear()
-            self._operation_media.clear()
-            self._operation_polls.clear()
         self._operation_projects[operation_id] = project_id
 
-    # ─── High-level API Methods ──────────────────────────────
+    # ─── High-Level Batch Methods ────────────────────────────────
 
     def flow_project_id(self, requested: str | None = None) -> str | None:
         """Validate an explicitly requested Flow project id."""
@@ -697,15 +710,15 @@ class FlowClient:
         except Exception as exc:
             return _batch_error(exc)
 
-    async def generate_images(self, prompt: str, project_id: str,
-                               aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
-                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                               character_media_ids: list[str] = None,
-                               image_model: str = None,
-                               count: int = 1,
-                               seed: int | None = None,
-                               base_media_id: str | None = None,
-                               preferred_extension=None) -> dict:
+    async def generate_images(self, prompt: str, project_id: str = None,
+                              character_media_ids: list[str] = None,
+                              aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
+                              user_paygate_tier: str = "PAYGATE_TIER_TWO",
+                              image_model: str = None,
+                              count: int = 1,
+                              seed: int | None = None,
+                              base_media_id: str | None = None,
+                              preferred_extension=None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -966,9 +979,14 @@ class FlowClient:
             media_id, complaint = await self._find_operation_media(operation_id)
             if not media_id:
                 return _as_pending_operation(operation_id, error=complaint)
+            logger.info("Matched media_id=%s for op=%s", media_id, operation_id)
             self._operation_media[operation_id] = media_id
 
-        urls = await self._batch_media_urls(media_id)
+        try:
+            urls = await self._batch_media_urls(media_id)
+        except Exception:
+            self._operation_media.pop(operation_id, None)
+            raise
         if not urls.video:
             # The id landed but the clip is still being written; downloading
             # now would save the poster still instead of the video.
@@ -998,6 +1016,15 @@ class FlowClient:
         self._operation_polls[operation_id] = rounds
 
         project_id = self._operation_projects.get(operation_id) or FLOW_PROJECT_ID
+        if not project_id:
+            try:
+                from agent.db import crud
+                req = await crud.get_request_by_operation_id(operation_id)
+                if req and req.get("project_id"):
+                    project_id = req["project_id"]
+                    self._remember_operation(operation_id, project_id)
+            except Exception:
+                pass
         complaint = None
         worth_looking = rounds % 3 == 0
         try:

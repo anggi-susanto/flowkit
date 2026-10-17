@@ -48,6 +48,7 @@ RPC_UPSCALE_IMAGE = "SPrCad"
 
 CAPTCHA_IMAGE = "IMAGE_GENERATION"
 CAPTCHA_VIDEO = "VIDEO_GENERATION"
+CAPTCHA_CHAT = "CHAT_GENERATION"
 
 #: The extension substitutes a freshly minted reCAPTCHA token for this marker.
 #: It has to be a placeholder rather than a real token because the mint has to
@@ -100,7 +101,7 @@ ASPECT_BY_NAME = {
 #: [tier][quality][aspect] and carried `…_portrait` / `…_fl` / `…_relaxed`
 #: variants; those are gone — aspect is its own slot now, and the suffixed
 #: names are rejected.
-VIDEO_MODEL = "veo_3_1_i2v_lite_low_priority"
+VIDEO_MODEL = "veo_3_1_i2v_lite"
 VIDEO_MODELS = {
     "veo_3_1_i2v_lite_low_priority",
     "veo_3_1_i2v_lite",
@@ -335,9 +336,9 @@ def _client_uuid() -> str:
     return str(uuid.uuid4()).upper()
 
 
-def _context(project_id: str) -> list:
+def _context(project_id: str, asset_id: Optional[str] = None) -> list:
     """The surface/project/captcha envelope every generate call repeats."""
-    return [None, SURFACE_ID, None, None, None, project_id, None, None, None, None,
+    return [None, SURFACE_ID, None, None, asset_id, project_id, None, None, None, None,
             [CAPTCHA_SLOT, 1]]
 
 
@@ -358,7 +359,8 @@ def image_request(prompt: str, project_id: str, count: int = 1,
                   prompts: Optional[list[str]] = None,
                   model: str = IMAGE_MODEL,
                   ref_media_ids: Optional[list[str]] = None,
-                  base_media_id: Optional[str] = None) -> str:
+                  base_media_id: Optional[str] = None,
+                  asset_id: Optional[str] = None) -> str:
     """One request item per variant, exactly as the REST payload did it.
 
     There is no "how many" field: Flow returns one image per item in the list,
@@ -372,6 +374,7 @@ def image_request(prompt: str, project_id: str, count: int = 1,
     resolved_model = resolve_image_model(model)
     base = seed if seed is not None else random.randint(1, 10**9)
     items = []
+    target_asset = asset_id or base_media_id
     for index in range(count):
         text = prompts[index] if prompts and index < len(prompts) else prompt
         image_inputs = []
@@ -381,10 +384,24 @@ def image_request(prompt: str, project_id: str, count: int = 1,
             _reference(mid) for mid in (ref_media_ids or []) if mid != base_media_id
         )
         items.append([None, None, image_inputs or None, base + index * 9973, ratio,
-                      resolved_model, None, _context(project_id), [[[text]]],
-                      None, None, None, _client_uuid(), _client_uuid()])
-    return build_envelope(RPC_GEN_IMAGE, [None, items, 1, _context(project_id),
+                      resolved_model, None, _context(project_id, target_asset), [[[text]]],
+                      None, None, None, None, _client_uuid()])
+    return build_envelope(RPC_GEN_IMAGE, [None, items, 1, _context(project_id, target_asset),
                                           [_client_uuid()]])
+
+
+STREAM_CHAT_PATH = "/_/AiSandboxAngularFrontend/data/google.internal.labs.aisandbox.proto.flow.agent.v1.FlowCreationAgentService/StreamChat"
+
+
+def stream_chat_request(prompt: str, project_id: str, client_uuid: str | None = None) -> str:
+    """Build the f.req payload for FlowCreationAgentService/StreamChat."""
+    cid = client_uuid or str(uuid.uuid4())
+    inner = [
+        cid,
+        [[[[prompt]]]],
+        [f"projects/{project_id}", None, [CAPTCHA_SLOT, 1], None, None, 9],
+    ]
+    return json.dumps([None, json.dumps(inner, separators=(",", ":"), ensure_ascii=False)], separators=(",", ":"), ensure_ascii=False)
 
 
 def image_upscale_request(media_id: str, resolution: str = "2K") -> str:
@@ -702,14 +719,23 @@ def find_media_id(payload: Any, operation_id: str) -> Optional[str]:
     """Look an operation up in the project listing and take its media id.
 
     Entries look like
-    ``[opId, null, null, [title, created, null, null, mediaId, clientUuid, done], projectId]``.
+    ``[assetId, folderId, null, [title, [sec, nanos], isVideo, null, mediaId, opId, done], projectId]``.
     """
+    op_lower = operation_id.lower()
     for node in _walk_lists(payload):
-        if len(node) < 4 or node[0] != operation_id:
+        if not isinstance(node, list) or len(node) < 4:
             continue
         detail = node[3]
-        if isinstance(detail, list) and len(detail) > 4 and isinstance(detail[4], str):
-            return detail[4]
+        if not isinstance(detail, list) or len(detail) <= 4:
+            continue
+        # 1. Match assetId directly
+        if isinstance(node[0], str) and node[0].lower() == op_lower:
+            if isinstance(detail[4], str):
+                return detail[4]
+        # 2. Match opId in detail[5]
+        if len(detail) > 5 and isinstance(detail[5], str) and detail[5].lower() == op_lower:
+            if isinstance(detail[4], str):
+                return detail[4]
     return None
 
 
@@ -720,17 +746,16 @@ _MEDIA_SLOT = re.compile(r'null,null,\\?"([0-9a-fA-F-]{36})\\?"')
 
 
 def find_media_id_in_text(text: str, operation_id: str) -> Optional[str]:
-    """Same lookup as :func:`find_media_id`, but on an unparsed listing.
-
-    The project listing has no page size that shrinks it and grows with every
-    generation, so it will outrun whatever response cap is in place — and a
-    truncated tail cannot be JSON-decoded even though the entry we want is
-    sitting in it intact. Scanning the text finds it anyway.
-    """
-    start = text.find(operation_id)
+    """Same lookup as :func:`find_media_id`, but case-insensitive on unparsed listing."""
+    lower_text = text.lower()
+    lower_op = operation_id.lower()
+    start = lower_text.find(lower_op)
     if start == -1:
         return None
-    match = _MEDIA_SLOT.search(text, start, start + 800)
+    # Search within window of match (from operation start onwards to avoid matching previous items)
+    window_start = start
+    window_end = min(len(text), start + 800)
+    match = _MEDIA_SLOT.search(text, window_start, window_end)
     return match.group(1) if match else None
 
 

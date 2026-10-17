@@ -8,7 +8,10 @@ Base URL: `http://127.0.0.1:8100`
 Before ANY workflow:
 ```bash
 curl -s http://127.0.0.1:8100/health
-# Must return: {"extension_connected": true}
+# Flow mode must return: {"extension_connected": true}
+# Assistant mode (MEDIA_PROVIDER=assistant or provider=assistant per request):
+# extension_connected may be false — no Chrome extension needed.
+# Check provider status instead: GET /api/providers/status
 ```
 
 ## Critical Rules (MUST follow)
@@ -22,7 +25,7 @@ curl -s http://127.0.0.1:8100/health
 7. **Cascade on regen** — regenerating an image auto-clears downstream video + upscale.
 8. **REGENERATE vs GENERATE** — `GENERATE_*` skips if already COMPLETED. `REGENERATE_*` always runs (clears + regenerates).
 9. **Image Material required** — every project needs a `material` field (e.g. `realistic`, `3d_pixar`, `anime`). List available: `GET /api/materials`.
-10. **Server handles throttling** — worker enforces max 5 concurrent requests + 10s cooldown. Submit ALL requests via `/batch`; do NOT manually stagger or loop.
+10. **Server handles throttling (per provider)** — each media provider declares its own limits (Flow: max 5 concurrent + 10s cooldown; assistant: max 2 concurrent, no cooldown). Submit ALL requests via `/batch`; do NOT manually stagger or loop. Check effective limits: `GET /api/providers/status`.
 11. **Video prompts use sub-clip timing** — structure 8s video as time segments: `0-3s: [action]. 3-6s: [action]. 6-8s: [action].`
 12. **Character dialogue in sub-clips** — embed speech in quotes: `Luna says "Goodnight."` Max 10-15 words per character per 2-3s segment.
 13. **Scenes are mutable** — use `PATCH /api/scenes/{sid}` to update `prompt`, `video_prompt`, `narrator_text`, `character_names` after creation. Don't delete and recreate — patch instead.
@@ -78,11 +81,14 @@ This project has reusable skills in `skills/`. When the user says `/fk-<name>`, 
 
 | Skill | Purpose |
 |-------|---------|
+| `/fk-action-choreography` | Action Choreography — AI Cinematic Combat & Motion Direction |
 | `/fk-add-material` | fk-add-material — Image Material System |
 | `/fk-brand-logo` | fk-brand-logo — Apply Channel Branding (Intro + Outro + Logo + 4K Badge) |
 | `/fk-camera-guide` | Camera Guide — Cinematic Video Prompts (Veo 3) |
 | `/fk-change-model` | fk-change-model — View & Change Video/Image Model Keys |
-| `/fk-change-provider` | fk-change-provider — View & Switch the AI CLI for a Role |
+| `/fk-change-provider` | fk-change-provider — View & Switch the Reviewer for a Role |
+| `/fk-character-bible` | Character Bible & Visual Consistency — AI Film Production |
+| `/fk-cinematic-transitions` | Cinematic Transitions & Chapter Bumpers — AI Film Direction |
 | `/fk-concat-fit-narrator` | Trim each scene video to fit its TTS narrator duration, burn text overlays, then concatenate into a final video. |
 | `/fk-concat` | Download and concatenate all scene videos into a single video with optional TTS narration. |
 | `/fk-create-project` | Create a new Google Flow video project. Ask the user for: |
@@ -102,10 +108,13 @@ This project has reusable skills in `skills/`. When the user says `/fk-<name>`, 
 | `/fk-insert-scene` | Insert new scene(s) into an existing video chain — for multi-angle shots, cutaways, or close-ups. |
 | `/fk-monitor` | fk-monitor — Full Pipeline Monitor |
 | `/fk-pipeline` | fk-pipeline — Smart Full-Pipeline Orchestrator |
+| `/fk-provider` | fk-provider — Media providers: choose the generation backend |
 | `/fk-refresh-urls` | Re-sign expired media URLs for all scenes in a video (images, videos, upscale videos) and character reference images. |
 | `/fk-research` | fk-research — Fact-Check & Research Before Scripting |
 | `/fk-review-board` | Start the Scene Review Board web app for visual feedback on scene chains. |
-| `/fk-review-video` | Review AI-generated scene videos for quality using Claude Vision. |
+| `/fk-review-video` | Review AI-generated scene videos for quality. |
+| `/fk-scriptwriter` | The Ultimate AI Screenplay Bible — Google Flow & Veo 3 |
+| `/fk-sound-design` | Sound Design & Audio Mastering — AI Cinematic Soundscapes |
 | `/fk-status` | Show full status dashboard for a project. |
 | `/fk-switch-project` | fk-switch-project — Switch Active Project |
 | `/fk-thumbnail-guide` | YouTube Thumbnail Guide — Hook-Worthy Design Rules |

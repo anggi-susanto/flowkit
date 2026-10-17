@@ -4,7 +4,7 @@ import mimetypes
 
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from pydantic import BaseModel, Field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from agent.config import (
     FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
@@ -22,6 +22,12 @@ from agent.services.omni_flash import (
 )
 
 router = APIRouter(prefix="/flow", tags=["flow"])
+
+
+def _safe_status_code(status: Any, default: int = 502) -> int:
+    if isinstance(status, int) and 400 <= status <= 599:
+        return status
+    return default
 
 
 class GenerateImageRequest(BaseModel):
@@ -236,7 +242,7 @@ async def generate_image(body: GenerateImageRequest):
     data["character_media_ids"] = refs or None
     result = await client.generate_images(**data)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     return result.get("data", result)
 
 
@@ -286,7 +292,7 @@ async def generate_video(body: GenerateVideoRequest):
         result = await client.generate_video(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     return result.get("data", result)
 
 
@@ -324,7 +330,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
         result = await client.generate_video_from_references(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     return result.get("data", result)
 
 
@@ -348,7 +354,7 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
         isinstance(result.get("status"), int) and result["status"] >= 400
     ):
         raise HTTPException(
-            result.get("status", 502),
+            _safe_status_code(result.get("status")),
             result.get("error", result.get("data")),
         )
     return result.get("data", result)
@@ -372,7 +378,7 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     return result.get("data", result)
 
 
@@ -384,7 +390,7 @@ async def upscale_video(body: UpscaleVideoRequest):
         raise HTTPException(503, "Extension not connected")
     result = await client.upscale_video(**body.model_dump())
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     return result.get("data", result)
 
 
@@ -418,7 +424,7 @@ async def check_status(body: CheckStatusRequest):
     if result.get("error"):
         raise HTTPException(502, result["error"])
     if isinstance(result.get("status"), int) and result["status"] >= 400:
-        raise HTTPException(result["status"], result.get("data", "Flow polling failed"))
+        raise HTTPException(_safe_status_code(result["status"]), result.get("data", "Flow polling failed"))
     return result.get("data", result)
 
 
@@ -442,7 +448,28 @@ async def check_omni_status(body: CheckOmniStatusRequest):
 
 @router.post("/refresh-urls/{project_id}")
 async def refresh_project_urls(project_id: str):
-    """Bulk refresh all media URLs for a project via per-media get_media calls."""
+    """Bulk refresh all media URLs for a project via per-media get_media calls.
+
+    Provider-neutral no-op: when every stored URL is local (file://), there is
+    nothing to re-sign and the extension is not required.
+    """
+    from agent.db import crud
+
+    urls: list[str] = []
+    for video in await crud.list_videos(project_id):
+        for scene in await crud.list_scenes(video["id"]):
+            for k, v in scene.items():
+                if k.endswith("_url") and v:
+                    urls.append(v)
+    for char in await crud.get_project_characters(project_id):
+        for k, v in char.items():
+            if k.endswith("_url") and v:
+                urls.append(v)
+
+    if not any(u.startswith("http") for u in urls):
+        return {"refreshed": 0, "found": len(urls),
+                "skipped": "no remote media URLs (all local or none); nothing to refresh"}
+
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
@@ -467,7 +494,7 @@ async def get_media(media_id: str):
         raise HTTPException(502, result["error"])
     status = result.get("status", 200)
     if isinstance(status, int) and status >= 400:
-        raise HTTPException(status, result.get("data", "Media not found"))
+        raise HTTPException(_safe_status_code(status, 404), result.get("data", "Media not found"))
     return result.get("data", result)
 
 
@@ -489,7 +516,7 @@ async def edit_image(body: EditImageRequest):
         seed=body.seed,
     )
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     return result.get("data", result)
 
 
@@ -509,7 +536,7 @@ async def export_image(body: UpscaleImageRequest):
         resolution=body.quality.upper(),
     )
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
-        raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+        raise HTTPException(_safe_status_code(result.get("status")), result.get("error", result.get("data")))
     data = result.get("data", result)
     try:
         content = base64.b64decode(data["encodedImage"], validate=True)
@@ -679,3 +706,53 @@ async def upload_image_file(
         mime_type=resolved_mime,
         file_name=resolved_name,
     )
+
+
+@router.get("/debug-cache")
+async def debug_cache():
+    client = get_flow_client()
+    return {
+        "operation_media": client._operation_media,
+        "operation_projects": client._operation_projects,
+        "operation_polls": client._operation_polls,
+    }
+
+
+@router.get("/debug-listing/{operation_id}")
+async def debug_listing(operation_id: str, project_id: str = "594758cc-11f5-4f92-8b3c-1213686591f4"):
+    import agent.services.flow_batch as fb
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.batch_rpc(
+        fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id),
+        match=operation_id, timeout=30,
+    )
+    raw = result.get("data") or ""
+    mid = fb.find_media_id_in_text(raw, operation_id)
+    return {
+        "operation_id": operation_id,
+        "matched_media_id": mid,
+        "raw_preview": raw[:1000],
+    }
+
+
+@router.get("/debug-project-media")
+async def debug_project_media(project_id: str = "594758cc-11f5-4f92-8b3c-1213686591f4"):
+    import re
+    import agent.services.flow_batch as fb
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.batch_rpc(
+        fb.RPC_PROJECT_MEDIA, fb.project_media_request(project_id),
+        match=None, timeout=60,
+    )
+    raw = result.get("data") or ""
+    uuids = list(set(re.findall(r'[0-9a-fA-F-]{36}', raw)))
+    return {
+        "raw_length": len(raw),
+        "found_uuids_count": len(uuids),
+        "uuids": uuids,
+        "sample": raw[:2000]
+    }

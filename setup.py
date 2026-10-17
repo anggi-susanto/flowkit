@@ -35,6 +35,7 @@ ROOT = Path(__file__).parent
 SKILLS_DIR = ROOT / "skills"
 CLAUDE_COMMANDS_DIR = ROOT / ".claude" / "commands"
 AGENTS_MD = ROOT / "AGENTS.md"
+ANTIGRAVITY_SKILLS_DIR = ROOT / ".agents" / "skills"
 STATE_FILE = ROOT / ".fk-setup.json"
 
 # Nothing generates these any more; `clean` still removes them so an install
@@ -84,6 +85,46 @@ def generate_claude(skills):
     return count
 
 
+def generate_antigravity(skills):
+    """Create .agents/skills/fk-<name>/SKILL.md for Antigravity IDE."""
+    ANTIGRAVITY_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for skill in skills:
+        name = skill["name"]
+        skill_id = f"fk-{name}"
+        desc = skill["description"]
+        src = Path(skill["path"])
+        content = src.read_text(encoding="utf-8")
+
+        # Strip existing frontmatter if any
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                body = parts[2].lstrip()
+            else:
+                body = content
+        else:
+            body = content
+
+        dest_dir = ANTIGRAVITY_SKILLS_DIR / skill_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "SKILL.md"
+
+        escaped_desc = desc.replace("'", "''").replace("\n", " ").strip()
+        skill_md = (
+            f"---\n"
+            f"name: {skill_id}\n"
+            f"description: '{escaped_desc}'\n"
+            f"---\n\n"
+            f"{body}\n"
+        )
+        dest.write_text(skill_md, encoding="utf-8")
+        count += 1
+    print(f"Generated {count} Antigravity skills in .agents/skills/")
+    return count
+
+
+
 ## ── Inline content for AGENTS.md ──
 # Inlined so a non-Claude tool sees the rules directly instead of following a
 # "read CLAUDE.md" pointer.
@@ -106,7 +147,7 @@ _CRITICAL_RULES = """\
 7. **Cascade on regen** — regenerating an image auto-clears downstream video + upscale.
 8. **REGENERATE vs GENERATE** — `GENERATE_*` skips if already COMPLETED. `REGENERATE_*` always runs (clears + regenerates).
 9. **Image Material required** — every project needs a `material` field (e.g. `realistic`, `3d_pixar`, `anime`). List available: `GET /api/materials`.
-10. **Server handles throttling** — worker enforces max 5 concurrent requests + 10s cooldown. Submit ALL requests via `/batch`; do NOT manually stagger or loop.
+10. **Server handles throttling (per provider)** — each media provider declares its own limits (Flow: max 5 concurrent + 10s cooldown; assistant: max 2 concurrent, no cooldown). Submit ALL requests via `/batch`; do NOT manually stagger or loop. Check effective limits: `GET /api/providers/status`.
 11. **Video prompts use sub-clip timing** — structure 8s video as time segments: `0-3s: [action]. 3-6s: [action]. 6-8s: [action].`
 12. **Character dialogue in sub-clips** — embed speech in quotes: `Luna says "Goodnight."` Max 10-15 words per character per 2-3s segment.
 13. **Scenes are mutable** — use `PATCH /api/scenes/{sid}` to update `prompt`, `video_prompt`, `narrator_text`, `character_names` after creation. Don't delete and recreate — patch instead.
@@ -175,7 +216,10 @@ def _agents_md_body(skills, title):
         f"Before ANY workflow:\n"
         f"```bash\n"
         f"curl -s http://127.0.0.1:8100/health\n"
-        f"# Must return: {{\"extension_connected\": true}}\n"
+        f"# Flow mode must return: {{\"extension_connected\": true}}\n"
+        f"# Assistant mode (MEDIA_PROVIDER=assistant or provider=assistant per request):\n"
+        f"# extension_connected may be false — no Chrome extension needed.\n"
+        f"# Check provider status instead: GET /api/providers/status\n"
         f"```\n\n"
         f"{_CRITICAL_RULES}\n"
         f"{_PIPELINE_OVERVIEW}\n"
@@ -218,6 +262,7 @@ def load_state():
 TOOLS = {
     "claude": generate_claude,
     "codex": generate_codex,
+    "antigravity": generate_antigravity,
 }
 
 
@@ -238,20 +283,18 @@ def do_interactive(skills):
     """Interactive mode: prompt user to pick tools."""
     print("\nFlow Kit — AI Tool Setup\n")
     print("Which AI tool do you drive this project from?")
-    print("  [1] Claude Code    (.claude/commands/)")
-    print("  [2] Codex CLI      (AGENTS.md)")
-    print("  [3] Both")
-    print()
-    print("  (agy / Antigravity reads none of these — it is configured as a")
-    print("   video-review provider instead, via /fk-change-provider.)")
+    print("  [1] Claude Code       (.claude/commands/)")
+    print("  [2] Codex CLI         (AGENTS.md)")
+    print("  [3] Antigravity IDE   (.agents/skills/)")
+    print("  [4] All tools")
     print()
 
-    raw = input("Select (comma-separated, e.g. 1,2): ").strip()
+    raw = input("Select (comma-separated, e.g. 1,2,3): ").strip()
     if not raw:
         print("No selection made. Exiting.")
         return
 
-    mapping = {"1": "claude", "2": "codex", "3": "all"}
+    mapping = {"1": "claude", "2": "codex", "3": "antigravity", "4": "all"}
     choices = [c.strip() for c in raw.split(",")]
 
     tools = []
@@ -311,6 +354,15 @@ def do_clean():
         for f in CLAUDE_COMMANDS_DIR.glob("fk-*.md"):
             f.unlink()
             removed.append(str(f))
+
+    # Antigravity skills
+    if ANTIGRAVITY_SKILLS_DIR.exists():
+        for d in ANTIGRAVITY_SKILLS_DIR.glob("fk-*"):
+            if d.is_dir():
+                for f in d.glob("*"):
+                    f.unlink()
+                d.rmdir()
+                removed.append(str(d))
 
     # Whatever the retired Gemini target left behind. Removed here even
     # though nothing writes it any more — an install from before v1.3.1 has
